@@ -1,0 +1,74 @@
+{
+ "against_epoch": 67,
+ "automatic_items_pass": true,
+ "computed_at": "2026-09-22T15:27:04+00:00",
+ "counts_as_shadow_fold": true,
+ "fitted_score_modes": [
+  "min_rg",
+  "min_rga",
+  "sd_min_rga"
+ ],
+ "for_epoch": 68,
+ "input_units": "nats_per_byte_rescored",
+ "knobs": {
+  "counted_rule": "v2",
+  "eps": 0.02,
+  "floor_coding_terminal": 0.4,
+  "floor_frac_of_static": 0.5,
+  "gamma": 1.0,
+  "group_cap": 0.6,
+  "half_life_verdicts": 60,
+  "m_max": 3,
+  "max_share_shift": 0.05,
+  "min_new_verdicts": 10,
+  "n_0": 8,
+  "rule_version": 1,
+  "share_unit": "slice_keys",
+  "stop_state_floor": 0.25,
+  "stop_state_groups": [
+   "king_done",
+   "king_tooluse",
+   "completion_pre",
+   "completion",
+   "king_divergence"
+  ],
+  "theta_pct": 0.25
+ },
+ "ledger_sha256": "165aa328ad8e3651f124d5260bc9d5dea4f5e7e25364eec9a3e10ef753e1f6b7",
+ "local_snapshot": "/home/const/subnet120/affine/state/curriculum/snapshots/77a7b0f8e68c307fb2be1d768cc3a19fa1f17d02280aa8a49031a64ba85430a8",
+ "manifest_sha256": "e79f0bbca92bd01329e91390164f67cf8c973f67ab5e7217b880fdf1ac99a871",
+ "mode": "apply",
+ "paths": {
+  "epoch": "curriculum/68/",
+  "ledger": "curriculum/ledger/165aa328ad8e3651f124d5260bc9d5dea4f5e7e25364eec9a3e10ef753e1f6b7.json",
+  "weights": "curriculum/weights/77a7b0f8e68c307fb2be1d768cc3a19fa1f17d02280aa8a49031a64ba85430a8/"
+ },
+ "rescoring_method": "per-turn legs R = centered tempered LME of a_i = lpC(y_i|z_A) - lpC(y_i|empty), G = banded lpC(z_A|x) vs the k reference thoughts, turn = min(R, G) per byte from the verdict's stored pairs with its own tau / band_c / band_floor, forfeit = forfeit_turn_score; identical for min_rg, min_rga (A leg not used) and sd_min_rga (the sd meter standardises these same legs over the slice)",
+ "rule_version": 1,
+ "score_modes_in_window": [
+  "min_rg",
+  "sd_min_rga"
+ ],
+ "shares_after_clamp": {
+  "agentic_ops": 0.0,
+  "coding": 0.266127275446,
+  "completion": 0.135885268409,
+  "completion_pre": 0.0128493654164,
+  "general": 0.115840119736,
+  "king_coached": 0.00369230769231,
+  "king_divergence": 0.033680512488,
+  "king_done": 0.016840256244,
+  "king_fail": 0.0629655135566,
+  "king_loop_onset": 0.032983985359,
+  "king_pivot": 0.0104818027076,
+  "king_recoverable": 0.0104818027076,
+  "king_tooluse": 0.0820274740355,
+  "long_context": 0.0,
+  "math": 0.0326377648543,
+  "nl2repo": 0.0139514575908,
+  "terminal": 0.153144832858,
+  "tool_use": 0.0164102608985
+ },
+ "theta": 1.62004783319e-05,
+ "weights_sha256": "77a7b0f8e68c307fb2be1d768cc3a19fa1f17d02280aa8a49031a64ba85430a8"
+}

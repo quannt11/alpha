@@ -1,0 +1,20 @@
+[Unit]
+Description=lab control plane (sentinel, agents, GPU fleet, Discord)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Work/lab
+ExecStart=%h/Work/lab/bin/labd
+Restart=always
+RestartSec=10
+# claude, ssh, rsync, git must be reachable; agents inherit this PATH (+ lab/bin)
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+# stop gracefully: labd cancels running agent processes on SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

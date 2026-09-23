@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Entry point for humans and agents. Uses the lab's own venv; no secrets here.
+LAB_HOME="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+exec "$LAB_HOME/.venv/bin/python" -m lab.cli "$@"

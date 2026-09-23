@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# large experiment artifacts stay out of git; notes, briefs and world state are tracked
+projects/*/work/exp/*/results/
+projects/*/world/*.tmp
+# per-deployment state written by labd and the agents (research notes, data, World State)
+projects/*/work/
+projects/*/world/

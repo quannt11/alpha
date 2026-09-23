@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# labrun — runs ON THE POD. Starts a job detached and keeps
+# /workspace/lab/<exp>/status.json current, so labd's watchdog can see
+# running / done / failed / stalled without waking an LLM.
+#
+#   labrun <exp> [--cwd DIR] -- <command string>
+#
+# Files in /workspace/lab/<exp>/:
+#   status.json    {"exp","state","pid","started_at","heartbeat_at","exit_code","cmd","message","progress"}
+#   run.log        stdout+stderr of the job
+#   progress.json  optional: your job may write it; it is copied into status.progress
+set -uo pipefail
+exp="${1:?usage: labrun <exp> [--cwd DIR] -- <command>}"; shift
+cwd=/workspace
+if [[ "${1:-}" == "--cwd" ]]; then cwd="$2"; shift 2; fi
+[[ "${1:-}" == "--" ]] && shift
+cmd="$*"
+[[ -n "$cmd" ]] || { echo "labrun: no command" >&2; exit 1; }
+d="/workspace/lab/$exp"
+mkdir -p "$d"
+
+if [[ -f "$d/status.json" ]] && grep -q '"state": *"running"' "$d/status.json"; then
+  pid=$(python3 -c "import json;print(json.load(open('$d/status.json')).get('pid',''))" 2>/dev/null)
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "labrun: $exp already running (pid $pid). Kill it first: kill -- -$pid" >&2
+    exit 1
+  fi
+fi
+
+cat > "$d/.status.py" <<'PY'
+import json, os, sys, time
+d, state = sys.argv[1], sys.argv[2]
+p = os.path.join(d, "status.json")
+try:
+    s = json.load(open(p))
+except Exception:
+    s = {}
+s.update(json.loads(sys.argv[3]) if len(sys.argv) > 3 else {})
+s["state"] = state
+s["heartbeat_at"] = time.time()
+try:
+    s["progress"] = json.load(open(os.path.join(d, "progress.json")))
+except Exception:
+    pass
+if state in ("done", "failed"):
+    try:
+        with open(os.path.join(d, "run.log"), errors="replace") as f:
+            s["message"] = "".join(f.readlines()[-15:])[-3000:]
+    except Exception:
+        pass
+tmp = p + ".tmp"
+json.dump(s, open(tmp, "w"), indent=1)
+os.replace(tmp, p)
+PY
+
+export LABRUN_EXP="$exp" LABRUN_DIR="$d"
+setsid nohup bash -c '
+  d="$1"; cwd="$2"; cmd="$3"; exp="$4"
+  st() { python3 "$d/.status.py" "$d" "$@"; }
+  st running "{\"exp\": \"$exp\", \"pid\": $$, \"started_at\": $(date +%s), \"cmd\": $(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$cmd"), \"exit_code\": null}"
+  ( while sleep 60; do st running; done ) & hb=$!
+  cd "$cwd" && bash -c "$cmd"
+  rc=$?
+  kill $hb 2>/dev/null
+  if [[ $rc -eq 0 ]]; then st done "{\"exit_code\": 0}"; else st failed "{\"exit_code\": $rc}"; fi
+' labrun "$d" "$cwd" "$cmd" "$exp" >> "$d/run.log" 2>&1 < /dev/null &
+sleep 2
+cat "$d/status.json" 2>/dev/null || echo "labrun: started (status file pending)"

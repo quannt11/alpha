@@ -1,0 +1,16 @@
+# Global lab configuration. Secrets are NOT here: labd reads them at runtime
+# from secrets_files (first file wins per key). Agents can never read those.
+[lab]
+state_dir = "~/.local/state/lab"
+secrets_files = ["~/.config/lab/secrets.env", "~/Work/discord-reporter/.env"]
+max_concurrent_agents = 3          # director / scout / analyst share these
+max_concurrent_threads = 8         # research threads never wait on each other (each has its own pods)
+max_concurrent_concierge = 2       # Discord answers never queue behind background work
+timezone = "Asia/Ho_Chi_Minh"
+
+[claude]
+bin = "claude"
+
+[runpod]
+ssh_key = "~/.ssh/runpod_pic"      # PiC key; the .pub goes into every pod's PUBLIC_KEY
+image = "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"

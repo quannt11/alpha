@@ -1,0 +1,142 @@
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from lab import cli
+from lab.db import DB
+
+ROOT = Path(__file__).resolve().parents[1]
+H100 = "NVIDIA H100 80GB HBM3"
+
+
+def run(*argv):
+    cli.main(list(argv))
+
+
+@pytest.fixture
+def thread(labdir, cfg, tmp_path, monkeypatch):
+    charter = tmp_path / "program.md"
+    charter.write_text("# Charter: harness fidelity\nMetric: |our score - validator score|\n")
+    run("thread", "start", "--title", "harness fidelity", "--metric", "abs_err_sd", "--text", str(charter))
+    monkeypatch.setenv("LAB_THREAD", "t-001")
+    return "t-001"
+
+
+def test_thread_start_creates_workdir_and_wakes_it(labdir, cfg, thread):
+    db = DB(cfg.db_path)
+    t = db.one("SELECT * FROM threads WHERE id='t-001'")
+    assert t["status"] == "active" and t["metric"] == "abs_err_sd"
+    wd = Path(t["workdir"])
+    assert "harness fidelity" in (wd / "program.md").read_text() and (wd / "results.tsv").exists()
+    ev = db.one("SELECT * FROM events WHERE topic='thread.start'")
+    assert ev["key"] == "t-001"
+
+
+def test_max_threads_enforced(labdir, cfg, thread, monkeypatch):
+    with pytest.raises(SystemExit):
+        run("thread", "start", "--title", "second", "--text", "x")      # max_threads = 1
+    run("thread", "retire", "t-001", "--text", "done")
+    run("thread", "start", "--title", "second", "--text", "x")
+    db = DB(cfg.db_path)
+    assert [r["id"] for r in db.all("SELECT id FROM threads WHERE status='active'")] == ["t-002"]
+
+
+def test_result_add_tracks_best_and_tsv(labdir, cfg, thread):
+    run("result", "add", "--metric", "abs_err_sd", "--value", "0.31", "--kept", "yes", "--desc", "baseline",
+        "--run", "r001", "--cost", "1.2")
+    run("result", "add", "--metric", "abs_err_sd", "--value", "0.40", "--kept", "no", "--desc", "worse lr")
+    run("result", "add", "--metric", "abs_err_sd", "--value", "0.12", "--kept", "yes", "--desc", "fix echo",
+        "--best")
+    db = DB(cfg.db_path)
+    t = db.one("SELECT * FROM threads")
+    assert t["best_value"] == 0.12 and t["best_desc"] == "fix echo"
+    topics = [r["topic"] for r in db.all("SELECT topic FROM events WHERE key='t-001' ORDER BY id")]
+    assert topics.count("thread.result") == 2 and "result.discarded" in topics
+    tsv = (Path(t["workdir"]) / "results.tsv").read_text().splitlines()
+    assert len(tsv) == 4 and "discard" in tsv[2]
+
+
+def test_note_and_claim(labdir, cfg, thread):
+    run("thread", "note", "t-001", "--text", "try the teacher at TP1", "--author", "Alice")
+    run("thread", "claim", "--text", "margin +0.31 sd vs reign 21 on 1000-turn slice")
+    db = DB(cfg.db_path)
+    msg = db.one("SELECT * FROM events WHERE topic='thread.message'")
+    assert msg["key"] == "t-001" and json.loads(msg["payload"])["from"] == "Alice"
+    assert db.one("SELECT severity FROM events WHERE topic='thread.claim'")["severity"] == "major"
+
+
+def test_thread_note_to_itself_does_not_wake_it(labdir, cfg, thread, monkeypatch):
+    monkeypatch.setenv("LAB_ROLE", "thread")
+    run("thread", "note", "t-001", "--text", "pass 1 summary")
+    db = DB(cfg.db_path)
+    assert not db.one("SELECT 1 FROM events WHERE topic='thread.message'")
+    assert db.one("SELECT key FROM events WHERE topic='thread.log'")["key"] == "t-001"
+
+
+def test_gpu_lease_by_thread_with_test_policy(labdir, cfg, thread):
+    run("gpu", "lease", "--gpu", H100, "--hours", "3", "--alt", "NVIDIA H100 NVL")
+    db = DB(cfg.db_path)
+    l = db.one("SELECT * FROM leases")
+    assert l["holder"] == "t-001" and l["status"] == "requested" and l["gpu_count"] == 1
+    assert json.loads(l["alternatives"]) == ["NVIDIA H100 NVL"] and l["max_hours"] == 3
+    with pytest.raises(SystemExit):                                     # test mode: 1 GPU
+        run("gpu", "lease", "--gpu", H100, "--count", "4")
+    with pytest.raises(SystemExit):                                     # test mode: H100 only
+        run("gpu", "lease", "--gpu", "NVIDIA H200")
+    run("gpu", "release")
+    assert db.one("SELECT status FROM leases")["status"] == "denied"    # a requested lease is cancelled
+
+
+def test_gpu_lease_needs_a_thread(labdir, cfg, monkeypatch):
+    monkeypatch.delenv("LAB_THREAD", raising=False)
+    with pytest.raises(SystemExit):
+        run("gpu", "lease", "--gpu", H100)
+
+
+def test_gpu_extend_checks_budget(labdir, cfg, thread):
+    db = DB(cfg.db_path)
+    lid = db.insert("leases", project="affine", holder="t-001", experiment_id="t-001", status="granted",
+                    gpu_type=H100, gpu_count=1, max_hours=2, price_hr=3.49, granted_at=time.time(),
+                    expires_at=time.time() + 7200, pool="research")
+    run("gpu", "extend", "--hours", "3")
+    l = db.one("SELECT * FROM leases WHERE id=?", (lid,))
+    assert l["max_hours"] == 5
+    with pytest.raises(SystemExit):
+        run("gpu", "extend", "--hours", "1000")                         # $3490 > $600
+
+
+def test_say_ticket_idea_inject(labdir, cfg, capsys):
+    run("say", "hello #120")
+    run("ticket", "new", "--title", "check epoch coverage", "--body", "please", "--author", "alice")
+    run("idea", "add", "--title", "idea", "--hypothesis", "because", "--gain", "+0.1 sd", "--cost", "40")
+    run("inject", "what is the king?", "--author", "bob")
+    db = DB(cfg.db_path)
+    assert db.one("SELECT content FROM outbox")["content"] == "hello #120"
+    topics = [r["topic"] for r in db.all("SELECT topic FROM events ORDER BY id")]
+    assert topics == ["ticket.new", "idea.new", "discord.request"]
+    assert json.loads(db.one("SELECT payload FROM events WHERE topic='discord.request'")["payload"])["simulated"]
+
+
+def test_gpu_stock_reads_feed(labdir, cfg, capsys):
+    db = DB(cfg.db_path)
+    db.kv_set("affine", "gpu_prices", {H100: {"SECURE": 3.49}, "NVIDIA H200": {"SECURE": 4.59}})
+    db.kv_set("affine", "stock", {"at": time.time(), "shapes": {
+        f"{H100}|4|SECURE": "Low", f"{H100}|8|SECURE": None, "NVIDIA H200|8|SECURE": None}})
+    run("gpu", "stock", "h100")
+    out = capsys.readouterr().out
+    assert "Low     4× NVIDIA H100 80GB HBM3" in out and "none    8× NVIDIA H100 80GB HBM3" in out
+    assert "H200" not in out and "$3.49/gpu/h" in out
+
+
+def test_gpu_pause_resume_humans_only(labdir, cfg, monkeypatch):
+    run("gpu", "pause", "fixing bugs")
+    db = DB(cfg.db_path)
+    assert db.kv_get("affine", "gpu_paused")["reason"] == "fixing bugs"
+    monkeypatch.setenv("LAB_RUN_ID", "12")          # an agent
+    with pytest.raises(SystemExit):
+        run("gpu", "resume")
+    monkeypatch.delenv("LAB_RUN_ID")
+    run("gpu", "resume")
+    assert not db.kv_get("affine", "gpu_paused")
