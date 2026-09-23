@@ -83,7 +83,9 @@ def threads_table(db: DB, project: str, include_retired: bool = False) -> str:
         best = f"{t['best_value']:.4g}" if t["best_value"] is not None else "—"
         out.append(f"- {t['id']} [{t['status']}] {t['title']} — metric {t['metric'] or '?'}, best {best} "
                    f"({t['best_desc'] or ''}); {n['n']} results ({n['k'] or 0} kept); {t['passes']} passes; "
-                   f"spent ${t['spent_usd'] or 0:.2f}; last pass {ago(t['last_pass_at'])}")
+                   f"spent ${t['spent_usd'] or 0:.2f}; last pass {ago(t['last_pass_at'])}; session {t['generation'] or 1}"
+                   + (f" at {t['context_tokens'] // 1000}k tokens" if t["context_tokens"] else "")
+                   + (" (handover next pass)" if t["rotate_pending"] else ""))
     return "\n".join(out)
 
 

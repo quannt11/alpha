@@ -18,7 +18,7 @@ Every agent's subagents run on Sonnet 5 (`CLAUDE_CODE_SUBAGENT_MODEL`).
 
 | Role | Model | Woken by | Does |
 |---|---|---|---|
-| thread | Fable 5.1 (routine job/lease checks: Sonnet 5, same session) | its own loop (`NEXT: now/wait/sleep`), its job finishing/failing, lease changes, messages | one autonomous research mind: owns a direction, edits code, rents/releases its own GPUs, runs experiments, keeps or reverts, logs `results.tsv` — forever, like autoresearch. Resumes the same Claude session every pass. |
+| thread | Fable 5.1 (routine job/lease checks: Sonnet 5, same session) | its own loop (`NEXT: now/wait/sleep`), its job finishing/failing, lease changes, messages | one autonomous research mind: owns a direction, edits code, rents/releases its own GPUs, runs experiments, keeps or reverts, logs `results.tsv` — forever, like autoresearch. Resumes the same Claude session every pass; past `research.rotate_context_tokens` (150k) it writes `HANDOVER.md` and continues in a fresh session. |
 | director | Opus 5.5 | results, stalls, claims, people's ideas/tickets, briefs, new king, hourly | portfolio: starts / steers / retires threads (max `research.max_threads`), weighs human ideas |
 | scout | Sonnet 5 | `world.change.*` (normal+) | updates `world/STATE.md`, `KNOWN_STALE.md`, publishes briefs |
 | analyst | Opus 5.5 (claims), Sonnet 5 (daily report) | `thread.claim`, 09:00 | red-teams claims; daily report of everything the agents did since the last one |

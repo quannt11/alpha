@@ -46,6 +46,7 @@ class Project:
     approval_over_usd: float         # 0 = never ask a human
     test_mode: bool
     max_threads: int                 # research threads alive at once (the Director may not exceed it)
+    rotate_context_tokens: int       # a thread whose context passes this gets a fresh session (0 = never)
     report_time: str
     lead_tick_hours: float
     fleet: dict
@@ -150,6 +151,7 @@ def load_project(pdir: Path) -> Project:
         approval_over_usd=float(budget.get("approval_over_usd", 0)),
         test_mode=bool(raw.get("test_mode", False)),
         max_threads=int(raw.get("research", {}).get("max_threads", 1)),
+        rotate_context_tokens=int(raw.get("research", {}).get("rotate_context_tokens", 150_000)),
         report_time=sched.get("daily_report", "09:00"),
         lead_tick_hours=float(sched.get("director_tick_hours", sched.get("lead_tick_hours", 1))),
         fleet=raw.get("fleet", {}),

@@ -20,6 +20,7 @@ director_tick_hours = 1            # the Director also wakes on every result, id
 
 [research]
 max_threads = 1                    # research threads (autonomous minds, each with its own GPUs) alive at once
+rotate_context_tokens = 150000     # past this, the thread writes HANDOVER.md and its next pass starts a fresh session
 
 [fleet]
 idle_stop_minutes = 20

@@ -147,6 +147,9 @@ class DB:
         ("pods", "last_pool", "TEXT"), ("pods", "last_experiment", "TEXT"), ("pods", "ssh_host", "TEXT"),
         ("pods", "ssh_port", "INTEGER"), ("experiments", "approved", "INTEGER DEFAULT 0"),
         ("agent_runs", "model", "TEXT"),
+        ("threads", "session_passes", "INTEGER DEFAULT 0"), ("threads", "session_cost", "REAL DEFAULT 0"),
+        ("threads", "context_tokens", "INTEGER"), ("threads", "rotate_pending", "INTEGER DEFAULT 0"),
+        ("threads", "generation", "INTEGER DEFAULT 1"),
     ]
 
     def _migrate(self) -> None:
@@ -154,6 +157,8 @@ class DB:
             cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                if (table, col) == ("threads", "session_passes"):  # existing sessions keep resuming
+                    self.conn.execute("UPDATE threads SET session_passes=passes WHERE session_id IS NOT NULL")
 
     # ---- generic helpers -------------------------------------------------
     def x(self, sql: str, args: Iterable[Any] = ()) -> sqlite3.Cursor:

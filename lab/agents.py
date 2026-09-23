@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 from .config import SONNET, LabConfig, Project, RoleConfig
-from .context import (activity_digest, backlog_table, events_digest, leases_table, read, results_table,
+from .context import (activity_digest, backlog_table, events_digest, iso, leases_table, read, results_table,
                       status_text, threads_table, tickets_table, world_facts)
 from .db import DB, now, topic_match
 
@@ -66,6 +66,26 @@ def fmt_events(rows, payload_limit: int) -> str:
             line += f"\n  payload: {p}"
         out.append(line)
     return "\n".join(out) or "(no events)"
+
+
+HANDOVER_ASK = """## This is the last pass of this session
+Your conversation is {k}k tokens long, and every tool call re-reads all of it. After this pass the lab
+starts you in a fresh session. Do this wake's work as usual; then, before your report, (over)write
+`HANDOVER.md` in your working directory. The next you reads it first and in full, and remembers nothing else:
+- what is running right now (pods, job names, where outputs land, when to check them);
+- your current best and its evidence; what you were about to do next, and why;
+- dead ends not to retry, and why; open questions and anything you promised people;
+- key paths, branches and commits.
+Keep it under ~10,000 characters; details belong in NOTES.md. Then end with your NEXT line as usual."""
+
+
+def context_tokens(res: dict) -> int | None:
+    """Context size of the last model call in a run (what the next call will re-read)."""
+    it = (res.get("usage") or {}).get("iterations") or []
+    u = it[-1] if it else None
+    if not isinstance(u, dict):
+        return None
+    return sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
 
 class Agents:
@@ -242,7 +262,8 @@ class Agents:
                 "world_dir": str(p.world_dir), "work_dir": str(p.work_dir), "workdir": str(workdir),
                 "role": role.name, "daily_usd": f"{p.daily_usd:.0f}", "pools": pools, "budget_rules": rules,
                 "per_experiment_usd": f"{p.per_experiment_usd:.0f}", "pod_prefix": p.pod_prefix,
-                "timezone": self.cfg.timezone, "report_time": p.report_time, "max_threads": str(p.max_threads)}
+                "timezone": self.cfg.timezone, "report_time": p.report_time, "max_threads": str(p.max_threads),
+                "rotate_k": str(p.rotate_context_tokens // 1000)}
         for k, v in subs.items():
             text = text.replace("{{" + k + "}}", v)
         return text
@@ -313,11 +334,25 @@ class Agents:
                 "", "## Your GPU leases", leases_table(db, name, holder=tid),
                 "", "## Your last results", results_table(db, name, thread=tid, limit=8),
                 "", "## Budget", status_text(db, self.cfg, p).splitlines()[1]]
-        if t["session_id"] and t["passes"]:
-            return [""] + live + ["", "(You are resuming your own session; your earlier passes are above in "
-                                  "this conversation. program.md and NOTES.md are in your working directory.)"]
-        return ["", "## Your charter (program.md)", read(wd / "program.md", 12000),
+        if t["session_id"] and t["session_passes"]:
+            out = [""] + live + ["", "(You are resuming your own session; your earlier passes are above in "
+                                 "this conversation. program.md and NOTES.md are in your working directory.)"]
+            if t["rotate_pending"]:
+                out += ["", HANDOVER_ASK.format(k=(t["context_tokens"] or 0) // 1000)]
+            return out
+        gen = t["generation"] or 1
+        fresh = ["", f"(This is a fresh session — generation {gen} of your mind. "
+                     + ("Your earlier sessions' memory is in HANDOVER.md (below), NOTES.md, results.tsv and your git "
+                        "branch; read NOTES.md in full if you need more.)" if gen > 1 else "Welcome.)")]
+        if (wd / "HANDOVER.md").exists():
+            fresh += ["", "## Handover from your previous session (HANDOVER.md)", read(wd / "HANDOVER.md", 12000)]
+        reports = db.all("SELECT * FROM agent_runs WHERE role='thread' AND key=? AND status='ok' AND result IS NOT NULL "
+                         "ORDER BY id DESC LIMIT 3", (tid,))
+        return fresh + ["", "## Your charter (program.md)", read(wd / "program.md", 12000),
                 "", "## Your notes (NOTES.md, tail)", "\n".join(read(wd / "NOTES.md", 40000).splitlines()[-80:]),
+                "", "## Your last pass reports (newest first)",
+                "\n\n".join(f"### run {r['id']} ({iso(r['ended_at'])})\n{(r['result'] or '')[:2000]}" for r in reports)
+                or "(none)",
                 "", "## GOAL of the lab", read(p.dir / "GOAL.md", 6000),
                 "", "## World State", read(p.world_dir / "STATE.md", 8000),
                 "", "## Other threads", threads_table(db, name), ""] + live
@@ -394,15 +429,17 @@ class Agents:
             log.exception("prompt build failed")
             self.db.update("agent_runs", "id=?", (run_id,), status="error", ended_at=now(), error=f"prompt: {e!r}")
             return
-        session = None
+        session, rotating = None, False
         if role.name == "thread":
             t = self.db.one("SELECT * FROM threads WHERE id=?", (key,))
-            if t and t["session_id"] and t["passes"]:
+            if t and t["session_id"] and t["session_passes"]:
                 session = (t["session_id"], True)
+                rotating = bool(t["rotate_pending"])
             else:
                 session = (str(uuid.uuid4()), False)
-                self.db.update("threads", "id=?", (key,), session_id=session[0])
-        model = self.model_for(role, evs)
+                self.db.update("threads", "id=?", (key,), session_id=session[0], session_cost=0)
+        # the handover pass is written by the main model, never by a routine-check model
+        model = role.model if rotating else self.model_for(role, evs)
         self.db.update("agent_runs", "id=?", (run_id,), model=model)
         cmd = self.command(p, role, run_id, workdir, sys_file, settings_file, session, model)
         self.db.emit(p.name, "agent.started", f"{role.name}{'/' + key if key else ''} run {run_id}", key=key or None)
@@ -430,11 +467,11 @@ class Agents:
             lost = session and session[1] and status == "error" and re.search(
                 r"no conversation found|session.*not found|could not resume", (stderr + text), re.I)
             if lost:  # the session is gone: start a fresh one next pass (notes and results survive)
-                self.db.update("threads", "id=?", (key,), session_id=None, passes=0)
+                self.db.update("threads", "id=?", (key,), session_id=None, session_passes=0, session_cost=0,
+                               rotate_pending=0)
                 self.db.emit(p.name, "thread.continue", f"{key}: session lost, restarting fresh", key=key)
             elif status in ("ok", "timeout"):
-                self.db.x("UPDATE threads SET passes=COALESCE(passes,0)+1, last_pass_at=?, "
-                          "session_id=COALESCE(?, session_id) WHERE id=?", (now(), res.get("session_id"), key))
+                self._after_thread_pass(p, key, run_id, session, res, status, rotating)
         self.db.emit(p.name, "agent.finished", f"{role.name}{'/' + key if key else ''} run {run_id}: {status}",
                      key=key or None, severity="info" if status == "ok" else "minor")
         if status == "ratelimited":
@@ -446,6 +483,32 @@ class Agents:
                 await self.on_result(p, role, key, self.db.one("SELECT * FROM agent_runs WHERE id=?", (run_id,)), res)
             except Exception:
                 log.exception("on_result failed")
+
+    def _after_thread_pass(self, p: Project, tid: str, run_id: int, session, res: dict, status: str,
+                           rotating: bool) -> None:
+        """Bookkeeping after a thread pass: its own cost, its context size, and session rotation."""
+        t = self.db.one("SELECT * FROM threads WHERE id=?", (tid,))
+        total = res.get("total_cost_usd")          # claude reports the whole session's cost so far
+        if total is not None:
+            prev = (t["session_cost"] or 0) if session and session[1] else 0
+            self.db.update("agent_runs", "id=?", (run_id,), cost_usd=round(max(0.0, total - prev), 4))
+        ctx = context_tokens(res)
+        cols = dict(passes=(t["passes"] or 0) + 1, session_passes=(t["session_passes"] or 0) + 1,
+                    last_pass_at=now(), session_id=res.get("session_id") or t["session_id"],
+                    session_cost=total if total is not None else t["session_cost"],
+                    context_tokens=ctx if ctx is not None else t["context_tokens"])
+        gen = t["generation"] or 1
+        if rotating and status == "ok":           # the handover is written: the next pass starts fresh
+            cols.update(session_id=None, session_passes=0, session_cost=0, rotate_pending=0, generation=gen + 1)
+            self.db.update("threads", "id=?", (tid,), **cols)
+            self.db.emit(p.name, "thread.rotated", f"{tid}: session {gen} closed at {(ctx or 0) // 1000}k tokens; "
+                         f"session {gen + 1} starts fresh from HANDOVER.md", key=tid)
+            return
+        if p.rotate_context_tokens and ctx and ctx >= p.rotate_context_tokens and not t["rotate_pending"]:
+            cols["rotate_pending"] = 1
+            self.db.emit(p.name, "thread.log", f"{tid}: context {ctx // 1000}k tokens ≥ "
+                         f"{p.rotate_context_tokens // 1000}k; next pass writes a handover", key=tid)
+        self.db.update("threads", "id=?", (tid,), **cols)
 
     def _backoff(self, run_id: int, r) -> None:
         streak = int(self.db.kv_get("_lab", "agent_backoff_streak", 0) or 0) + 1

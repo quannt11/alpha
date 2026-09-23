@@ -22,7 +22,9 @@ if [ "$mode" = ratelimit ]; then
   exit 1
 fi
 sleep "${FAKE_SLEEP:-0}"
-echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"is_error\\":false,\\"result\\":\\"reply from $LAB_ROLE\\",\\"session_id\\":\\"sess-$n\\",\\"total_cost_usd\\":0.01,\\"num_turns\\":2}"
+ctx=$(cat "$dir/ctx" 2>/dev/null || echo 1000)
+cost=$(cat "$dir/cost" 2>/dev/null || echo 0.01)
+echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"is_error\\":false,\\"result\\":\\"reply from $LAB_ROLE\\",\\"session_id\\":\\"sess-$n\\",\\"total_cost_usd\\":$cost,\\"num_turns\\":2,\\"usage\\":{\\"iterations\\":[{\\"input_tokens\\":10,\\"cache_read_input_tokens\\":$ctx,\\"cache_creation_input_tokens\\":0}]}}"
 """
 
 
@@ -243,3 +245,65 @@ async def test_prompts_build_for_every_role(db, cfg, project, fake):
     assert {n: r.model for n, r in project.roles.items()} == {
         "concierge": "claude-sonnet-5", "scout": "claude-sonnet-5", "thread": "claude-fable-5-1",
         "analyst": "claude-opus-5-5", "director": "claude-opus-5-5"}
+
+
+async def test_thread_pass_cost_is_the_delta_of_the_session_total(db, cfg, fake):
+    a = Agents(db, cfg)
+    add_thread(db)
+    (fake / "cost").write_text("7.79")
+    db.emit("affine", "thread.start", "go", key="t-001")
+    await drain(a)
+    (fake / "cost").write_text("7.95")             # claude reports the session's running total
+    db.emit("affine", "thread.continue", "again", key="t-001")
+    await drain(a)
+    assert [round(r["cost_usd"], 2) for r in runs(db)] == [7.79, 0.16]
+    t = db.one("SELECT * FROM threads")
+    assert t["passes"] == 2 and t["session_passes"] == 2 and t["context_tokens"] == 1010
+
+
+async def test_session_rotates_with_a_handover(db, cfg, fake, tmp_path):
+    p = cfg.project("affine")
+    p.rotate_context_tokens = 150_000
+    a = Agents(db, cfg)
+    add_thread(db)
+    wd = p.work_dir / "threads" / "t-001"
+    (fake / "ctx").write_text("200000")
+    db.emit("affine", "thread.start", "go", key="t-001")
+    await drain(a)
+    t = db.one("SELECT * FROM threads")
+    assert t["rotate_pending"] == 1 and t["context_tokens"] == 200010
+    assert db.one("SELECT 1 FROM events WHERE topic='thread.log'")
+    # the next pass resumes, is asked for a handover, and runs on the main model even for a routine check
+    db.emit("affine", "job.check", "r001 running", key="t-001")
+    await drain(a)
+    argv1 = (fake / "calls" / "1.argv").read_text().splitlines()
+    assert "--resume" in argv1 and argv_model(fake, 1) == "claude-fable-5-1"
+    assert "last pass of this session" in (fake / "calls" / "1.prompt").read_text()
+    t = db.one("SELECT * FROM threads")
+    assert t["session_id"] is None and t["session_passes"] == 0 and t["generation"] == 2 and t["passes"] == 2
+    assert t["rotate_pending"] == 0 and db.one("SELECT 1 FROM events WHERE topic='thread.rotated'")
+    # the pass after that starts a fresh session seeded from the handover and recent reports
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "HANDOVER.md").write_text("r007 is running on Pi_affine-01; best +0.12 sd")
+    (fake / "ctx").write_text("30000")
+    db.emit("affine", "thread.continue", "go on", key="t-001")
+    await drain(a)
+    argv2 = (fake / "calls" / "2.argv").read_text().splitlines()
+    assert "--session-id" in argv2 and "--resume" not in argv2
+    prompt = (fake / "calls" / "2.prompt").read_text()
+    assert "generation 2" in prompt and "r007 is running on Pi_affine-01" in prompt
+    assert "## Your last pass reports" in prompt and "reply from thread" in prompt
+    t = db.one("SELECT * FROM threads")
+    assert t["session_passes"] == 1 and t["generation"] == 2 and t["rotate_pending"] == 0
+
+
+async def test_timed_out_handover_pass_does_not_rotate(db, cfg, fake):
+    p = cfg.project("affine")
+    a = Agents(db, cfg)
+    add_thread(db, session="s-old", passes=3)
+    db.x("UPDATE threads SET session_passes=3, rotate_pending=1, context_tokens=400000")
+    db.x("INSERT INTO agent_runs(project, role, key, status, queued_at, event_ids) VALUES('affine','thread','t-001','queued',?,'[]')", (now(),))
+    rid = db.one("SELECT id FROM agent_runs")["id"]
+    a._after_thread_pass(p, "t-001", rid, ("s-old", True), {"total_cost_usd": 1.0}, "timeout", True)
+    t = db.one("SELECT * FROM threads")
+    assert t["session_id"] == "s-old" and t["rotate_pending"] == 1 and t["generation"] == 1
