@@ -240,11 +240,11 @@ async def test_prompts_build_for_every_role(db, cfg, project, fake):
         sysp = a.system_prompt(project, role, project.work_dir / name)
         assert "{{" not in sysp, name
         assert name in text and len(text) > 100
-    assert set(project.roles) == {"concierge", "scout", "thread", "analyst", "director"}
+    assert set(project.roles) == {"concierge", "scout", "thread", "analyst", "director", "maintainer"}
     assert project.roles["thread"].model == "claude-fable-5-1"
     assert {n: r.model for n, r in project.roles.items()} == {
         "concierge": "claude-sonnet-5", "scout": "claude-sonnet-5", "thread": "claude-fable-5-1",
-        "analyst": "claude-opus-5-5", "director": "claude-opus-5-5"}
+        "analyst": "claude-opus-5-5", "director": "claude-opus-5-5", "maintainer": "claude-opus-5-5"}
 
 
 async def test_thread_pass_cost_is_the_delta_of_the_session_total(db, cfg, fake):

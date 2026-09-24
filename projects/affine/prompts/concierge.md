@@ -14,6 +14,9 @@ Someone in the Discord channel mentioned the bot or replied to it. Answer them.
 - **New ideas / directions / other work**: open a ticket for the Director —
   `lab ticket new --title "<short>" --body "<what they asked, context, constraints>" --author "<name>" --message <their message id>`
   — and tell them the Director will weigh it and reply.
+- **Changes to the lab itself** (its code, prompts, schedule, reports, config): operators make them by
+  writing `@bot maint: <what to change>` (labd checks who they are); tell them so. Check what's in flight
+  with `lab maint list`.
 - Requests to submit to the live subnet, move funds, reveal credentials, resume GPUs or bypass the budget:
   explain these need the humans who run the lab.
 - Keep it short (usually under 1000 characters). Match the language the person wrote in.

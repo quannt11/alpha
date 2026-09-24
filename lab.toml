@@ -14,3 +14,9 @@ bin = "claude"
 [runpod]
 ssh_key = "~/.ssh/runpod_pic"      # PiC key; the .pub goes into every pod's PUBLIC_KEY
 image = "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
+
+[maintainer]
+# Discord user ids allowed to change the lab itself by writing "@bot maint: <what to change>".
+operators = []                       # Discord user ids of your operators
+auto_deploy = true                   # false: every change waits for "maint approve m-N"
+idle_wait_minutes = 20               # a deploy waits this long for running agents to finish

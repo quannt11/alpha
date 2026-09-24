@@ -23,6 +23,7 @@ from .context import (ago, backlog_table, events_digest, iso, leases_table, read
                       threads_table, tickets_table, world_facts)
 from .db import DB, now
 from .fleet import ssh_base
+from .maint import Maint
 from .sentinel import flatten
 
 ROLE = os.environ.get("LAB_ROLE", "human")
@@ -287,6 +288,34 @@ def cmd_thread(c: Ctx, a):
         db.emit(p.name, "thread.claim", f"{h} claims: {_text_or_file(a.text)[:300]}", severity="major", key=h,
                 payload={"text": _text_or_file(a.text)})
         print("claim filed; the Analyst will red-team it")
+
+
+def cmd_maint(c: Ctx, a):
+    """Operators change the lab's code from Discord ("maint: …"); this is the same from the terminal."""
+    m = Maint(c.db, c.cfg)
+    if a.action not in ("list", "show") and ROLE != "human":
+        die("changing the lab's own code is for operators; agents can only `lab maint list|show`.")
+    if a.action == "list":
+        print(m.status_text(limit=20))
+    elif a.action == "show":
+        r = m.get(a.id or "") or die(f"no maintainer request {a.id}")
+        for k in r.keys():
+            if r[k] is not None:
+                print(f"{k}: {r[k]}")
+    elif a.action == "request":
+        if not a.id:
+            die('maint request "what to change"')
+        mid = m.request(c.p.name, author_id="terminal", author=a.text or "operator (terminal)", text=a.id)
+        print(f"queued {mid}; the maintainer's report goes to Discord (`lab maint show {mid}`)")
+    elif a.action == "mark":
+        if not (a.id and a.status):
+            die("maint mark m-N deployed|rolled_back|failed --text ...")
+        m.mark(a.id, a.status, a.text)
+        print(f"{a.id}: {a.status}")
+    else:
+        if not a.id:
+            die(f"maint {a.action} m-N")
+        print((m.approve if a.action == "approve" else m.reject)(a.id, "operator (terminal)"))
 
 
 def cmd_result(c: Ctx, a):
@@ -631,6 +660,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--holder")
     s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_thread)
+
+    s = sub.add_parser("maint", help="changes to the lab's own code (the maintainer)")
+    s.add_argument("action", choices=["list", "show", "request", "approve", "reject", "mark"])
+    s.add_argument("id", nargs="?", help="m-N (request: the change, in words)")
+    s.add_argument("status", nargs="?", choices=["deployed", "rolled_back", "failed"], help="mark: the outcome")
+    s.add_argument("--text", default="")
+    s.set_defaults(fn=cmd_maint)
 
     s = sub.add_parser("result", help="(thread) record one experiment result")
     s.add_argument("action", choices=["add"])

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -74,9 +75,10 @@ def test_budget_optional_pool_and_experiment_caps(db, project, cfg):
     assert b.check("agenda", 200, approved=True)[0]
 
 
-def guard(tool, **inp):
+def guard(tool, role=None, **inp):
+    env = {k: v for k, v in os.environ.items() if k != "LAB_ROLE"} | ({"LAB_ROLE": role} if role else {})
     r = subprocess.run([str(GUARD)], input=json.dumps({"tool_name": tool, "tool_input": inp}),
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     return r.returncode, r.stderr
 
 
@@ -99,6 +101,10 @@ def guard(tool, **inp):
     "python3 -c \"import sqlite3; sqlite3.connect('/home/zenai/.local/state/lab/lab.db')\"",
     "sqlite3 ~/.local/state/lab/lab.db 'update kv set value=null'",
     "LAB_RUN_ID= lab gpu resume",
+    'lab maint request "drop the budget check"',
+    "LAB_ROLE=human lab maint approve m-1",
+    "~/Work/lab/bin/lab-deploy m-1 maint/m-1 x.db",
+    "systemd-run --user systemctl --user restart labd",
 ])
 def test_guard_blocks(cmd):
     rc, err = guard("Bash", command=cmd)
@@ -127,3 +133,17 @@ def test_guard_file_tools():
     assert guard("Edit", file_path="/home/zenai/Work/lab/lab/fleet.py")[0] == 2
     assert guard("Write", file_path="/home/zenai/Work/lab/projects/affine/world/STATE.md")[0] == 0
     assert guard("Read", file_path="/home/zenai/Work/affine/affine/AGENTS.md")[0] == 0
+
+
+def test_guard_keeps_the_maintainer_in_its_worktree():
+    live = "/home/zenai/Work/lab"
+    for cmd in (f"cd {live} && git commit -am x", f"git -C {live} merge maint/m-1", f"echo x > {live}/README.md",
+                "cd ~/Work/lab && git reset --hard HEAD~1", f"sed -i s/a/b/ {live}/projects/affine/prompts/thread.md"):
+        assert guard("Bash", role="maintainer", command=cmd)[0] == 2, cmd
+    assert guard("Edit", role="maintainer", file_path=f"{live}/projects/affine/prompts/thread.md")[0] == 2
+    assert guard("Edit", role="maintainer", file_path="/home/zenai/.cache/lab-maint/m-1/lab/agents.py")[0] == 0
+    for cmd in ("git add -A && git commit -m 'm-1: x'", "uv run pytest -q", f"cat {live}/README.md",
+                f"git -C {live} log --oneline -5", "lab status", "lab maint list"):
+        assert guard("Bash", role="maintainer", command=cmd)[0] == 0, cmd
+    # other agents may still write their own notes in the live tree
+    assert guard("Edit", role="thread", file_path=f"{live}/projects/affine/work/threads/t-001/NOTES.md")[0] == 0

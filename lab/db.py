@@ -120,6 +120,16 @@ CREATE TABLE IF NOT EXISTS ledger (
 );
 CREATE INDEX IF NOT EXISTS ledger_ts ON ledger(project, ts);
 
+CREATE TABLE IF NOT EXISTS maint (
+  id TEXT PRIMARY KEY,              -- m-1: one operator request to change the lab's own code
+  project TEXT, created_at REAL, updated_at REAL, author_id TEXT, author TEXT,
+  message_id TEXT, channel_id TEXT, request TEXT, context TEXT,
+  status TEXT,   -- queued | working | awaiting_approval | deploying | restarting | deployed | rolled_back
+                 -- | no_change | failed | rejected
+  branch TEXT, base_sha TEXT, head_sha TEXT, files TEXT, protected TEXT, summary TEXT, note TEXT,
+  deploy_requested_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS kv (
   project TEXT, key TEXT, value TEXT, PRIMARY KEY (project, key)
 );

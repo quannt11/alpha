@@ -41,8 +41,8 @@ def labdir(tmp_path, monkeypatch):
     shutil.copy(src / "GOAL.md", pdir / "GOAL.md")
     (tmp_path / "code").mkdir()
     monkeypatch.setenv("LAB_CONFIG", str(tmp_path / "lab.toml"))
-    monkeypatch.delenv("LAB_PROJECT", raising=False)
-    monkeypatch.delenv("LAB_ROLE", raising=False)
+    for var in ("LAB_PROJECT", "LAB_ROLE", "LAB_RUN_ID", "LAB_THREAD"):   # tests also run inside agent sessions
+        monkeypatch.delenv(var, raising=False)
     return tmp_path
 
 

@@ -23,6 +23,7 @@ Every agent's subagents run on Sonnet 5 (`CLAUDE_CODE_SUBAGENT_MODEL`).
 | scout | Sonnet 5 | `world.change.*` (normal+) | updates `world/STATE.md`, `KNOWN_STALE.md`, publishes briefs |
 | analyst | Opus 5.5 (claims), Sonnet 5 (daily report) | `thread.claim`, 09:00 | red-teams claims; daily report of everything the agents did since the last one |
 | concierge | Sonnet 5 | @mention / reply in the channel | answers (read-only), forwards guidance to a thread, files ideas for the Director |
+| maintainer | Opus 5.5 | an operator's `maint: …` in Discord (or `lab maint request`) | changes the lab itself in its own git worktree, tests it, commits; labd deploys it (below) |
 
 ## Operate
 
@@ -33,6 +34,7 @@ lab status | lab world | lab events -n 50 | lab runs | lab budget | lab gpu list
 lab thread list | lab thread show t-001 | lab thread note t-001 --text "try X"
 lab gpu pause "reason" | lab gpu resume   # humans only: stop all lab GPUs / allow them again
 lab inject "question" --author me     # simulate a Discord request
+lab maint list | lab maint request "change X" | lab maint approve m-3   # lab changes (humans only)
 lab emit tick.daily_report "now"      # force a daily report
 ```
 
@@ -53,6 +55,25 @@ is denied with a clear reason; everything else works.
   control plane, and killing labd. The concierge runs read-only (`dontAsk` + allowlist).
   It is a seatbelt, not a vault: agents run as the same Unix user.
 - World changes reach threads through the Scout's brief → the Director, who notes or retires affected threads.
+
+## Changing the lab from Discord (the maintainer)
+Operators (`lab.toml` `[maintainer].operators`, Discord user ids — checked in code) write
+`@bot maint: <what to change>`. Anyone else gets a refusal; plain questions still go to the concierge.
+1. labd opens request `m-N` and wakes the maintainer (Opus) in a git worktree (`~/.cache/lab-maint/m-N`,
+   branch `maint/m-N` from the live HEAD). `bin/lab-guard` keeps it out of the live tree; it cannot push,
+   restart labd or deploy. It edits, runs the tests and commits — or makes no commit and asks a question.
+2. labd (plain code) checks the branch: nothing under `projects/*/work|world`, nothing credential-shaped,
+   and `[maintainer].test_cmd` (`uv run pytest -q`) passes. Then it posts the agent's summary and diffstat.
+3. Changes touching the guard, budget/test mode, secret handling, operators, `lab.toml`, `systemd/`, the
+   deploy script or `lab/maint.py` wait for `maint approve m-N` (or `maint reject m-N`); so does everything
+   when `auto_deploy = false`. Other changes deploy automatically.
+4. Deploy: labd stops starting background agents, waits for running ones (≤ `idle_wait_minutes`), then
+   starts `bin/lab-deploy` under `systemd-run` (outside labd's cgroup): merge `--no-ff` into the live
+   master, `uv sync` if dependencies changed, restart labd, and require a fresh heartbeat plus a working
+   `lab status`. If labd is not healthy it reverts the merge (a new commit), restarts, and reports
+   `rolled_back`. The outcome is posted as a reply to the request.
+`maint status` / `maint list` in Discord, or `lab maint list|show|request|approve|reject` in the terminal.
+`lab status` (and so every agent prompt that includes it) lists unfinished requests under "Lab changes".
 
 ## Add a project
 Create `projects/<name>/` with `project.toml` (copy affine's), `plugin.py` (`sources()` +

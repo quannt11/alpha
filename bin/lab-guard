@@ -15,6 +15,7 @@ import sys
 
 HOME = os.path.expanduser("~")
 LAB = os.path.join(HOME, "Work", "lab")
+MAINTAINER = os.environ.get("LAB_ROLE") == "maintainer"
 
 SECRET_PATH = re.compile(
     r"(\.local/state/lab/|\.config/lab/secrets|discord-reporter/\.env|\.claude/settings(\.local)?\.json|\.claude\.json|"
@@ -24,6 +25,10 @@ ENV_DUMP = re.compile(r"(^|[;&|(]\s*)(printenv|env|export\s+-p|set|declare\s+-x)
 CONTROL_PLANE = re.compile(
     re.escape(LAB) + r"/(lab/|bin/|lab\.toml|vendor/|projects/[^/\s]+/(project\.toml|plugin\.py))|"
     r"~/Work/lab/(lab/|bin/|lab\.toml|vendor/|projects/[^/\s]+/(project\.toml|plugin\.py))")
+# the maintainer changes its own worktree; the live lab is merged into only by bin/lab-deploy
+LIVE_LAB = re.compile(r"(" + re.escape(LAB) + r"|~/Work/lab|\$HOME/Work/lab)(?=[/\s'\"]|$)")
+GIT_WRITES = {"commit", "merge", "reset", "checkout", "switch", "rebase", "revert", "cherry-pick", "stash", "tag",
+              "branch", "worktree", "restore", "rm", "mv", "apply", "am", "clean", "pull", "fetch", "add", "update-ref"}
 WRITE_OP = re.compile(r"(sed\s+-i|\btee\b|>|\bmv\b|\bcp\b|\brm\b|\bchmod\b|\btruncate\b|\binstall\b|\bln\b)")
 
 BASH_RULES = [
@@ -32,6 +37,8 @@ BASH_RULES = [
     (re.compile(r"runpodctl|rest\.runpod\.io|api\.runpod\.io"), "GPUs are rented only through `lab gpu lease` (budget-enforced)."),
     (re.compile(r"\blab\s+gpu\s+(resume|pause)\b|\bLAB_RUN_ID=|\bunset\s+LAB_RUN_ID\b|env\s+-u\s*LAB_RUN_ID"),
      "pausing/resuming GPUs is a human decision."),
+    (re.compile(r"\blab\s+maint\s+(request|approve|reject|mark)\b|\blab-deploy\b|\bsystemd-run\b"),
+     "changing and deploying the lab's own code is for operators."),
     (re.compile(r"(systemctl\b.*\blabd\b|\bpkill\b.*\blab|\bkillall\b.*\blab|kill\b.*\$\(pgrep[^)]*lab)"),
      "the control plane is not yours to stop or restart."),
     (re.compile(r"\brm\s+-[A-Za-z]*r[A-Za-z]*\s+(/|~|\$HOME|/home/[^/\s]+)/?(\s|$)"), "refusing to delete a home or root directory."),
@@ -92,6 +99,9 @@ def main():
                 block(msg)
         if CONTROL_PLANE.search(cmd) and WRITE_OP.search(cmd):
             block("the lab control plane (lab/, bin/, lab.toml, project.toml, plugin.py) is read-only for agents.")
+        if MAINTAINER and LIVE_LAB.search(cmd) and (WRITE_OP.search(cmd) or GIT_WRITES & set(git_subcommands(cmd))):
+            block("the live lab is read-only for you: change and commit in your worktree (your cwd); "
+                  "labd deploys it.")
         return
     paths = [inp.get(k) for k in ("file_path", "path", "notebook_path") if inp.get(k)]
     if tool in ("Grep", "Glob") and inp.get("pattern"):
@@ -102,6 +112,8 @@ def main():
             block("that path holds credentials.")
         if tool in ("Edit", "Write", "NotebookEdit", "MultiEdit") and CONTROL_PLANE.search(full):
             block("the lab control plane is read-only for agents.")
+        if MAINTAINER and tool in ("Edit", "Write", "NotebookEdit", "MultiEdit") and (full + "/").startswith(LAB + "/"):
+            block("the live lab is read-only for you: edit the copy in your worktree (your cwd).")
 
 
 if __name__ == "__main__":

@@ -159,6 +159,16 @@ def events_digest(db: DB, project: str, since: float, min_sev: str = "info", lim
                      f"{' ' + r['key'] if r['key'] else ''}: {r['summary']}" for r in reversed(rows))
 
 
+MAINT_IN_FLIGHT = ("queued", "working", "awaiting_approval", "deploying", "restarting")
+
+
+def maint_in_flight(db: DB) -> str:
+    """Unfinished changes to the lab's own code (lab-wide, not per project); "" when there are none."""
+    rows = db.all(f"SELECT id, status, request FROM maint WHERE status IN ({','.join('?' * len(MAINT_IN_FLIGHT))}) "
+                  "ORDER BY created_at", MAINT_IN_FLIGHT)
+    return "\n".join(f"- {r['id']} [{r['status']}] {' '.join((r['request'] or '').split())[:80]}" for r in rows)
+
+
 def status_text(db: DB, cfg, project) -> str:
     b = Budget(db, project, cfg.timezone).summary()
     pools = ", ".join(f"{k} ${v['spent']:.0f}+{v['reserved']:.0f}res" + (f"/{v['cap']:.0f}" if v["cap"] is not None else "")
@@ -168,6 +178,7 @@ def status_text(db: DB, cfg, project) -> str:
     backoff = db.kv_get("_lab", "agent_backoff_until", 0) or 0
     agents = ", ".join(f"{r['role']}{'/' + r['key'] if r['key'] else ''} ({ago(r['started_at'])})" for r in running) or "idle"
     paused = db.kv_get(project.name, "gpu_paused")
+    changes = maint_in_flight(db)
     return "\n".join([
         f"# {project.name} — status at {iso(now())}"
         + (f"   ** GPUs PAUSED by operator since {iso(paused['at'])} **" if paused else ""),
@@ -177,5 +188,6 @@ def status_text(db: DB, cfg, project) -> str:
         "", "## Research threads", threads_table(db, project.name),
         "", "## GPU leases", leases_table(db, project.name),
         "", "## Open tickets", tickets_table(db, project.name),
+        *(["", "## Lab changes", changes] if changes else []),
         "", "## Ideas", backlog_table(db, project.name),
     ])

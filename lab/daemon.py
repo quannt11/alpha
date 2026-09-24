@@ -25,6 +25,7 @@ from .budget import next_local
 from .db import DB, now, topic_match
 from .discord import Destination, DiscordError, DiscordREST, Gateway, is_addressed_to_bot, strip_mention
 from .fleet import Fleet
+from .maint import Maint
 from .runpod import Runpod
 from .sentinel import Sentinel, load_plugin
 
@@ -60,6 +61,7 @@ class Daemon:
         self.sentinels: dict[str, Sentinel] = {}
         self.fleets: dict[str, Fleet] = {}
         self.agents = Agents(self.db, cfg, on_result=self.on_result)
+        self.maint = Maint(self.db, cfg)
         self.thread_parent: dict[str, str | None] = {}
         self.thread_wait_check_s = 3600
         for p in cfg.projects.values():
@@ -161,7 +163,11 @@ class Daemon:
         if not self.bot_id or not is_addressed_to_bot(m, self.bot_id) or author.get("bot"):
             return
         text = strip_mention(m.get("content", ""), self.bot_id)
-        payload = {"id": m["id"], "channel_id": m["channel_id"], "author_id": author.get("id"), "author_name": name,
+        # "maint: …" / "maint approve m-N": operators changing the lab itself (checked here, in code)
+        if self.maint.handle_message(p, author_id=author.get("id"), author=name, text=text, message_id=m["id"],
+                                     channel_id=m["channel_id"], context=ref.get("content") if ref else None):
+            return
+        payload ={"id": m["id"], "channel_id": m["channel_id"], "author_id": author.get("id"), "author_name": name,
                    "content": text, "reply_to": ref.get("id"), "reply_to_content": ref.get("content") if ref else None,
                    "attachments": [a.get("url") for a in m.get("attachments", [])]}
         self.db.emit(p.name, "discord.request", f"{name}: {text[:300]}", severity="normal", key=m["id"],
@@ -183,6 +189,8 @@ class Daemon:
                 self.say(p.name, text, reply_to=reply_to, channel_id=payload.get("channel_id"), role="concierge")
         if role.name == "thread":
             self._continue_thread(p, key, run, text)
+        if role.name == "maintainer":
+            await self.maint.finish(p, key, run, text)
         if role.name in ("scout", "director", "analyst", "thread"):
             await self._commit_state(p, f"{role.name} run {run['id']}: {text.splitlines()[0][:80] if text else run['status']}")
         if role.name == "analyst":
@@ -263,6 +271,14 @@ class Daemon:
                 log.exception("agents loop")
             await self._sleep(2)
 
+    async def maint_loop(self):
+        while not self.stop.is_set():
+            try:
+                await self.maint.tick()
+            except Exception:
+                log.exception("maint loop")
+            await self._sleep(5)
+
     async def fleet_loop(self):
         last_rec = last_wd = 0.0
         while not self.stop.is_set():
@@ -341,7 +357,8 @@ class Daemon:
             loop.add_signal_handler(sig, self.stop.set)
         await self.discord_boot()
         tasks = [asyncio.create_task(c) for c in (
-            self.agents_loop(), self.fleet_loop(), self.scheduler_loop(), self.outbox_loop(), self.announce_loop())]
+            self.agents_loop(), self.fleet_loop(), self.scheduler_loop(), self.outbox_loop(), self.announce_loop(),
+            self.maint_loop())]
         tasks += [asyncio.create_task(s.run(self.stop)) for s in self.sentinels.values()]
         if self.gateway:
             tasks.append(asyncio.create_task(self.gateway.run()))

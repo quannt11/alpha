@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# lab-deploy ID BRANCH DB — merge a tested maintainer branch into the live lab, restart labd, and revert
+# the merge if labd does not come back healthy. labd starts this under systemd-run, outside its own
+# cgroup, so restarting labd does not kill it. The outcome goes back through `lab maint mark`.
+# Everything runs inside functions defined before the last line, so the merge may rewrite this file safely.
+main() {
+  set -u
+  local id=$1 branch=$2 db=$3
+  LAB_HOME="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+  cd "$LAB_HOME" || return 1
+  local lab="$LAB_HOME/bin/lab" old new out logs
+  mark() { "$lab" maint mark "$id" "$1" --text "$2" || echo "lab-deploy: could not record $1: $2" >&2; }
+
+  old=$(git rev-parse HEAD)
+  if ! out=$(git -c user.name="lab maintainer" -c user.email=lab@localhost \
+             merge --no-ff --no-edit -m "maint $id: merge $branch" "$branch" 2>&1); then
+    git merge --abort >/dev/null 2>&1
+    mark failed "merging $branch into the live lab failed, nothing changed: $(tail -c 600 <<<"$out")"
+    return 1
+  fi
+  new=$(git rev-parse HEAD)
+  sync_deps "$old" "$new"
+  if restart_healthy "$db"; then
+    mark deployed "merged as $(git rev-parse --short "$new"); labd restarted and is healthy."
+    return 0
+  fi
+  logs=$(journalctl --user -u labd -n 20 --no-pager --since "@$T0" 2>&1 | tail -c 900)
+  git -c user.name="lab maintainer" -c user.email=lab@localhost revert -m 1 --no-edit "$new" >/dev/null 2>&1
+  sync_deps "$new" "$(git rev-parse HEAD)"
+  if restart_healthy "$db"; then
+    mark rolled_back "labd did not come up healthy on the new code, so the merge was reverted and the old code \
+is running again. Last log lines:
+\`\`\`
+$logs
+\`\`\`"
+  else
+    mark failed "labd did not come up healthy, and not after the revert either. It needs a human: \
+\`journalctl --user -u labd\`."
+  fi
+  return 1
+}
+
+# dependencies changed: bring the venv in line before restarting
+sync_deps() {
+  git diff --quiet "$1" "$2" -- pyproject.toml uv.lock || uv sync --quiet
+}
+
+# healthy = the service is active, its scheduler has written a heartbeat well after the restart, and the CLI works
+restart_healthy() {
+  local db=$1 hb i
+  T0=$(date +%s)
+  systemctl --user restart labd || return 1
+  for ((i = 0; i < ${LAB_DEPLOY_TRIES:-24}; i++)); do
+    sleep "${LAB_DEPLOY_POLL_S:-5}"
+    hb=$("$LAB_HOME/.venv/bin/python" - "$db" <<'EOF'
+import json, sqlite3, sys
+r = sqlite3.connect(sys.argv[1]).execute("SELECT value FROM kv WHERE project='_lab' AND key='heartbeat'").fetchone()
+print(int(json.loads(r[0])) if r else 0)
+EOF
+)
+    if systemctl --user is-active --quiet labd && [ "${hb:-0}" -ge $((T0 + 15)) ] && "$LAB_HOME/bin/lab" status >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+main "$@"; exit $?   # one line: bash never reads past it, even if the merge rewrote this file

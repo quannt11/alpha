@@ -68,6 +68,16 @@ class Project:
 
 
 @dataclass
+class MaintConfig:
+    operators: list[str]            # Discord user ids allowed to change the lab from Discord
+    auto_deploy: bool               # False: every change waits for "maint approve"
+    dir: Path                       # git worktrees of in-flight changes
+    test_cmd: str                   # must pass (in the worktree) before anything is deployed
+    idle_wait_s: int                # how long a deploy waits for running agents to finish
+    deploy_cmd: list[str] | None    # None: bin/lab-deploy under systemd-run (tests override it)
+
+
+@dataclass
 class LabConfig:
     root: Path
     state_dir: Path
@@ -80,6 +90,7 @@ class LabConfig:
     claude_bin: str
     runpod: dict
     projects: dict[str, Project]
+    maint: MaintConfig
 
     def project(self, name: str) -> Project:
         if name not in self.projects:
@@ -108,6 +119,8 @@ DEFAULT_ROLES: dict[str, dict] = {
     "analyst":   {"model": OPUS, "priority": 40, "timeout_s": 1800, "debounce_s": 60,
                   "wake_on": ["thread.claim", "tick.daily_report"],
                   "light_model": SONNET, "light_topics": ["tick.daily_report"]},
+    # changes the lab's own code on an operator's request ("maint: …" in Discord), in a git worktree
+    "maintainer": {"model": OPUS, "priority": 15, "timeout_s": 3600, "wake_on": ["maint.request"]},
     # owns the portfolio of research directions: starts, steers and retires threads
     "director":  {"model": OPUS, "priority": 50, "timeout_s": 3600, "debounce_s": 60,
                   "wake_on": ["ticket.new", "idea.new", "thread.result", "thread.stalled", "thread.retired",
@@ -165,6 +178,7 @@ def load(path: str | Path | None = None) -> LabConfig:
     path = expand(path or os.environ.get("LAB_CONFIG") or LAB_ROOT / "lab.toml")
     raw = _load_toml(path)
     lab = raw.get("lab", {})
+    maint = raw.get("maintainer", {})
     root = path.parent
     state_dir = expand(lab.get("state_dir", "~/.local/state/lab"))
     projects: dict[str, Project] = {}
@@ -185,6 +199,14 @@ def load(path: str | Path | None = None) -> LabConfig:
         claude_bin=raw.get("claude", {}).get("bin", "claude"),
         runpod=raw.get("runpod", {}),
         projects=projects,
+        maint=MaintConfig(
+            operators=[str(x) for x in maint.get("operators", [])],
+            auto_deploy=bool(maint.get("auto_deploy", True)),
+            dir=expand(maint.get("dir", "~/.cache/lab-maint")),
+            test_cmd=maint.get("test_cmd", "uv run pytest -q"),
+            idle_wait_s=int(float(maint.get("idle_wait_minutes", 20)) * 60),
+            deploy_cmd=maint.get("deploy_cmd"),
+        ),
     )
 
 

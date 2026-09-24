@@ -18,15 +18,16 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import SONNET, LabConfig, Project, RoleConfig
+from .config import LAB_ROOT, SONNET, LabConfig, Project, RoleConfig
 from .context import (activity_digest, backlog_table, events_digest, iso, leases_table, read, results_table,
                       status_text, threads_table, tickets_table, world_facts)
 from .db import DB, now, topic_match
+from .maint import Maint
 
 log = logging.getLogger("lab.agents")
 
 SEV = {"info": 0, "minor": 1, "normal": 2, "major": 3}
-KEYED_ROLES = {"concierge", "thread"}
+KEYED_ROLES = {"concierge", "thread", "maintainer"}
 RATE_RE = re.compile(r"rate.?limit|usage limit|too many requests|\b429\b|overloaded|limit reached|"
                      r"resets? at|quota|out of (extra )?usage", re.I)
 SECRET_ENV = ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "DISCORD_BOT_TOKEN_ARBOS_BITTENSOR")
@@ -35,7 +36,7 @@ READONLY_TOOLS = [
     "Read", "Grep", "Glob", "WebFetch", "WebSearch",
     "Bash(lab status*)", "Bash(lab world*)", "Bash(lab events*)",
     "Bash(lab ticket*)", "Bash(lab idea list*)", "Bash(lab idea add*)", "Bash(lab thread list*)",
-    "Bash(lab thread show*)", "Bash(lab thread note*)",
+    "Bash(lab thread show*)", "Bash(lab thread note*)", "Bash(lab maint list*)", "Bash(lab maint show*)",
     "Bash(lab budget*)", "Bash(lab runs*)", "Bash(lab gpu list*)", "Bash(lab gpu stock*)",
     "Bash(ls*)", "Bash(cat *)", "Bash(head *)", "Bash(tail *)", "Bash(grep *)", "Bash(rg *)", "Bash(wc *)",
     "Bash(find *)", "Bash(git log*)", "Bash(git show*)", "Bash(git diff*)", "Bash(git status*)",
@@ -47,7 +48,9 @@ def lab_bin_dir(cfg: LabConfig) -> Path:
     return cfg.root / "bin"
 
 
-def role_workdir(project: Project, role: str, key: str | None) -> Path:
+def role_workdir(project: Project, role: str, key: str | None, cfg: LabConfig | None = None) -> Path:
+    if role == "maintainer" and cfg:
+        return cfg.maint.dir / (key or "unknown")     # a git worktree of the lab (Maint.prepare)
     if role == "thread":
         return project.work_dir / "threads" / (key or "unknown")
     if role == "scout":
@@ -95,6 +98,7 @@ class Agents:
         self.on_result = on_result          # async (project, role, key, run_row, result_dict) -> None
         self.tasks: dict[int, asyncio.Task] = {}
         self._roles: dict[int, str] = {}         # run id -> role, for slot accounting
+        self.maint = Maint(db, cfg)
         self.runs_dir = cfg.state_dir / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -199,11 +203,11 @@ class Agents:
         return float(self.db.kv_get("_lab", "agent_backoff_until", 0) or 0)
 
     def slot_class(self, role: str) -> str:
-        return role if role in ("thread", "concierge") else "thinker"
+        return role if role in ("thread", "concierge", "maintainer") else "thinker"
 
     def slot_limit(self, cls: str) -> int:
-        return {"thread": self.cfg.max_concurrent_threads, "concierge": self.cfg.max_concurrent_concierge}.get(
-            cls, self.cfg.max_concurrent_agents)
+        return {"thread": self.cfg.max_concurrent_threads, "concierge": self.cfg.max_concurrent_concierge,
+                "maintainer": 1}.get(cls, self.cfg.max_concurrent_agents)
 
     def launch(self) -> None:
         """Start queued runs by priority. Research threads, the concierge and the thinking roles have
@@ -213,6 +217,8 @@ class Agents:
         rows = self.db.all("SELECT * FROM agent_runs WHERE status='queued' ORDER BY id")
         if not rows:
             return
+        # a lab deploy is waiting for the agents to go idle: only people's questions still start
+        hold = float(self.db.kv_get("_lab", "agents_hold_until", 0) or 0) > now()
         in_use: dict[str, int] = {}
         for rid, t in self.tasks.items():
             if not t.done():
@@ -224,6 +230,8 @@ class Agents:
         for r in sorted(rows, key=prio):
             if r["project"] not in self.cfg.projects or r["role"] not in self.cfg.projects[r["project"]].roles:
                 self.db.update("agent_runs", "id=?", (r["id"],), status="error", error="unknown project or role")
+                continue
+            if hold and r["role"] != "concierge":
                 continue
             cls = self.slot_class(r["role"])
             if in_use.get(cls, 0) >= self.slot_limit(cls):
@@ -241,8 +249,13 @@ class Agents:
     # ------------------------------------------------------------ prompts
     def system_prompt(self, p: Project, role: RoleConfig, workdir: Path) -> str:
         parts = []
-        for name in ("common.md", f"{role.name}.md"):
-            f = p.prompts_dir / name
+        # the maintainer works on the lab itself, not on a project: its prompt is lab-wide
+        if role.name == "maintainer":
+            files = [next((d / "prompts" / "maintainer.md" for d in (self.cfg.root, LAB_ROOT)
+                           if (d / "prompts" / "maintainer.md").exists()), LAB_ROOT / "prompts" / "maintainer.md")]
+        else:
+            files = [p.prompts_dir / "common.md", p.prompts_dir / f"{role.name}.md"]
+        for f in files:
             if f.exists():
                 parts.append(f.read_text())
         text = "\n\n".join(parts)
@@ -299,6 +312,18 @@ class Agents:
                      "", "## Research threads (tell the Director if a change affects them)", threads_table(db, name)]
         elif role.name == "thread":
             head += self._thread_context(p, key)
+        elif role.name == "maintainer":
+            m = self.maint.get(key) or {"author": "?", "request": "(no such request)", "context": None,
+                                        "branch": None, "base_sha": None}
+            head += ["", f"## The request ({key}) from **{m['author']}**",
+                     "> " + (m["request"] or "").replace("\n", "\n> ")]
+            if m["context"]:
+                head += ["It replies to this earlier bot message:", "> " + m["context"][:3000].replace("\n", "\n> ")]
+            head += ["", "## Your worktree",
+                     f"`{role_workdir(p, role.name, key, self.cfg)}` (your cwd): branch `{m['branch']}`, from the "
+                     f"live lab's HEAD {(m['base_sha'] or '')[:10]}. The live lab `{self.cfg.root}` is read-only for you.",
+                     "", "## Earlier maintainer requests", self.maint.status_text(),
+                     "", "## Lab status", status_text(db, self.cfg, p)]
         elif role.name == "director":
             head += ["", "## GOAL", read(p.dir / "GOAL.md", 6000),
                      "", "## Your journal (tail)",
@@ -415,8 +440,16 @@ class Agents:
         key = r["key"] or ""
         ids = json.loads(r["event_ids"] or "[]")
         evs = self.db.all(f"SELECT * FROM events WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id", ids) if ids else []
-        workdir = role_workdir(p, role.name, key)
-        workdir.mkdir(parents=True, exist_ok=True)
+        try:
+            workdir = self.maint.prepare(key) if role.name == "maintainer" else role_workdir(p, role.name, key)
+            workdir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log.exception("workdir failed")
+            self.db.update("agent_runs", "id=?", (run_id,), status="error", ended_at=now(), error=f"workdir: {e!r}")
+            if role.name == "maintainer" and self.maint.get(key):
+                self.maint._set(key, status="failed", note=f"could not make a worktree: {e}"[:500])
+                self.maint.say(self.maint.get(key), f"**{key} not deployed:** could not make a worktree: {e}"[:1500])
+            return
         base = self.runs_dir / f"{run_id:06d}-{p.name}-{role.name}"
         sys_file, settings_file = base.with_suffix(".system.md"), base.with_suffix(".settings.json")
         prompt_file, out_file = base.with_suffix(".prompt.md"), base.with_suffix(".out.json")
