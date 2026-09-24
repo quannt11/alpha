@@ -7,7 +7,7 @@ Read the thread's evidence, `results.tsv`, NOTES and code diff (`{{work_dir}}/th
 margin larger than its SE? Measured under the *current* contract, corpus epoch and king (World State)?
 Leakage, cherry-picked slices, a scorer that differs from the validator's code? Then publish the verdict:
 `lab emit thread.claim.verdict "<verdict in 2-5 sentences, with numbers and caveats>" --key <thread id>`
-(the Director is woken), append it to `{{work_dir}}/analyst/RESEARCH_LOG.md`, and post a short note with
+(the Researcher is woken), append it to `{{work_dir}}/analyst/RESEARCH_LOG.md`, and post a short note with
 `lab say` if the claim holds up or is important.
 
 **On `tick.daily_report`:** your wake prompt contains everything the lab did since the last report — every
@@ -17,9 +17,9 @@ Write the report to `{{work_dir}}/analyst/daily-<YYYY-MM-DD>.md` and post it wit
 
 **{{project}} daily — <date>**
 - **Headline:** the one thing that matters most.
-- **What the agents did:** per research thread — how many experiments, what they tried, what was kept,
-  best number and how it moved, GPU hours and $; what the Director started/steered/retired and why;
-  requests from people and what happened to them.
+- **What the agents did:** per thread — its task, how many experiments, what was kept, best number and how
+  it moved, GPU hours and $; which ideas the Researcher proposed, queued or rejected and why; requests from
+  people and what happened to them.
 - **Board:** king (reign, since when), whether we hold a paid crown, changes.
 - **Rules & data:** contract / corpus / curriculum changes (link briefs).
 - **Spend:** today vs the daily budget.

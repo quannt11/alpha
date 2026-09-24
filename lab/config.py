@@ -27,9 +27,13 @@ class RoleConfig:
     debounce_s: int = 0
     wake_on: list[str] = field(default_factory=list)
     tools: str = "full"           # "readonly" | "full"
+    # the only tools the agent is given (`claude --tools`): every other built-in tool's schema costs ~8–10k
+    # tokens on every model call; None = Claude Code's default set
+    toolset: list[str] | None = None
     min_severity: str = "info"    # ignore wake events below this severity
     light_model: str | None = None  # used when every wake event is a routine check (light_topics)
     light_topics: list[str] = field(default_factory=list)
+    advisor: str | None = None      # `claude --advisor`: a stronger model the agent consults in-loop at hard decisions
 
 
 @dataclass
@@ -45,10 +49,11 @@ class Project:
     per_experiment_usd: float        # 0 = no per-experiment cap
     approval_over_usd: float         # 0 = never ask a human
     test_mode: bool
-    max_threads: int                 # research threads alive at once (the Director may not exceed it)
+    max_threads: int                 # implementor threads alive at once (labd starts them for ready ideas)
     rotate_context_tokens: int       # a thread whose context passes this gets a fresh session (0 = never)
     report_time: str
-    lead_tick_hours: float
+    research_tick_hours: float       # the Researcher's review tick, fired only while no task is queued or running
+    idle_retire_hours: float         # a thread without a task this long is retired (0 = never)
     fleet: dict
     roles: dict[str, RoleConfig]
     sentinel: dict
@@ -83,7 +88,7 @@ class LabConfig:
     state_dir: Path
     db_path: Path
     secrets_files: list[Path]
-    max_concurrent_agents: int      # scout, analyst, director share these slots
+    max_concurrent_agents: int      # scout, researcher, analyst share these slots
     max_concurrent_threads: int     # research threads are independent: each works on its own pods
     max_concurrent_concierge: int   # people in Discord never wait behind background work
     timezone: str
@@ -100,34 +105,39 @@ class LabConfig:
         return self.projects[name]
 
 
+CORE_TOOLS = ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "WebFetch", "WebSearch", "Agent"]
+READ_TOOLS = ["Bash", "Read", "Grep", "Glob", "WebFetch", "WebSearch"]
+LIGHT_MAX_CONTEXT = 40_000   # the prompt cache is per model: a light model re-caching a bigger session costs more
+
 OPUS = "claude-opus-5-5"
 FABLE = "claude-fable-5-1"
 SONNET = "claude-sonnet-5"   # chat, reading and routine checks; also every agent's subagents
 
 DEFAULT_ROLES: dict[str, dict] = {
-    # people in Discord; read-only, answers directly or files an idea/ticket for the Director
-    "concierge": {"model": SONNET, "priority": 10, "timeout_s": 600, "tools": "readonly",
+    # people in Discord; read-only: answers status/ETA/world questions itself, routes research ideas
+    "concierge": {"model": SONNET, "priority": 10, "timeout_s": 600, "tools": "readonly", "toolset": READ_TOOLS,
                   "wake_on": ["discord.request"]},
     # turns detected world changes into World State + briefs
-    "scout":     {"model": SONNET, "priority": 20, "timeout_s": 1200, "debounce_s": 60,
+    "scout":     {"model": SONNET, "toolset": CORE_TOOLS, "priority": 20, "timeout_s": 1200, "debounce_s": 60,
                   "wake_on": ["world.change"], "min_severity": "normal"},
-    # a research thread: one persistent mind that runs its own experiment loop on its own GPUs
-    "thread":    {"model": FABLE, "priority": 30, "timeout_s": 5400,
-                  "wake_on": ["thread.start", "thread.continue", "thread.message", "gpu.lease", "gpu.waiting",
+    # the research mind: analyses where we stand, reads papers, writes ideas that labd hands to threads,
+    # answers the threads' questions and reads their reports. Its context is about ideas only.
+    "researcher": {"model": FABLE, "toolset": CORE_TOOLS, "priority": 25, "timeout_s": 3600, "debounce_s": 90,
+                   "wake_on": ["thread.report", "thread.question", "research.suggestion", "world.brief",
+                               "board.king", "thread.claim.verdict", "tick.research"], "min_severity": "normal"},
+    # an implementor: takes one task at a time, rents its GPUs, implements, evaluates, reports back;
+    # consults Fable in-loop (the advisor strategy) at decisions it can't reasonably make alone
+    "thread":    {"model": OPUS, "toolset": CORE_TOOLS, "effort": "medium", "advisor": FABLE, "priority": 30, "timeout_s": 5400,
+                  "wake_on": ["thread.task", "thread.continue", "thread.message", "gpu.lease", "gpu.waiting",
                               "job.finished", "job.anomaly", "job.check", "job.idle"],
                   # a pass woken only by a routine job/lease check resumes the same session on Sonnet
                   "light_model": SONNET, "light_topics": ["job.check", "job.idle", "gpu.waiting"]},
     # red-teams claims (Opus), writes the daily report (Sonnet)
-    "analyst":   {"model": OPUS, "priority": 40, "timeout_s": 1800, "debounce_s": 60,
+    "analyst":   {"model": OPUS, "toolset": CORE_TOOLS, "priority": 40, "timeout_s": 1800, "debounce_s": 60,
                   "wake_on": ["thread.claim", "tick.daily_report"],
                   "light_model": SONNET, "light_topics": ["tick.daily_report"]},
     # changes the lab's own code on an operator's request ("maint: …" in Discord), in a git worktree
-    "maintainer": {"model": OPUS, "priority": 15, "timeout_s": 3600, "wake_on": ["maint.request"]},
-    # owns the portfolio of research directions: starts, steers and retires threads
-    "director":  {"model": OPUS, "priority": 50, "timeout_s": 3600, "debounce_s": 60,
-                  "wake_on": ["ticket.new", "idea.new", "thread.result", "thread.stalled", "thread.retired",
-                              "thread.claim.verdict", "world.brief", "board.king", "budget.alert", "tick.director",
-                              "operator.resume"]},
+    "maintainer": {"model": OPUS, "toolset": CORE_TOOLS, "priority": 15, "timeout_s": 3600, "wake_on": ["maint.request"]},
 }
 
 
@@ -168,7 +178,8 @@ def load_project(pdir: Path) -> Project:
         max_threads=int(raw.get("research", {}).get("max_threads", 1)),
         rotate_context_tokens=int(raw.get("research", {}).get("rotate_context_tokens", 150_000)),
         report_time=sched.get("daily_report", "09:00"),
-        lead_tick_hours=float(sched.get("director_tick_hours", sched.get("lead_tick_hours", 1))),
+        research_tick_hours=float(sched.get("research_tick_hours", 6)),
+        idle_retire_hours=float(raw.get("research", {}).get("idle_retire_hours", 24)),
         fleet=raw.get("fleet", {}),
         roles=roles,
         sentinel=raw.get("sentinel", {}),

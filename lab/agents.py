@@ -2,7 +2,7 @@
 
 Each role is a fresh `claude -p` process per wake (the Ralph pattern from
 affine/ralphs/ralph.sh: no memory between passes except the working directory
-and the lab's registries). The dispatcher turns new events into queued runs;
+and the lab's registries); implementor threads resume their own session. The dispatcher turns new events into queued runs;
 the launcher starts them by priority under a global concurrency cap and backs
 off everything when the subscription reports a usage/rate limit.
 """
@@ -18,17 +18,16 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import LAB_ROOT, SONNET, LabConfig, Project, RoleConfig
-from .context import (activity_digest, backlog_table, events_digest, iso, leases_table, read, results_table,
-                      status_text, threads_table, tickets_table, world_facts, world_now)
+from .config import LAB_ROOT, LIGHT_MAX_CONTEXT, SONNET, LabConfig, Project, RoleConfig
+from .context import (activity_digest, backlog_table, file_ref, iso, leases_table, read, research_doc,
+                      results_table, state_head, status_text, threads_table, world_now)
 from .db import DB, now, topic_match
 from .maint import Maint
 
 log = logging.getLogger("lab.agents")
 
 SEV = {"info": 0, "minor": 1, "normal": 2, "major": 3}
-DIRECTOR_WAITS_FOR_SCOUT_S = 1200
-STATE_LIMIT = 30000   # STATE.md is ~26k chars; cutting it at 8k hid everything past the scoring section
+RESEARCHER_WAITS_FOR_SCOUT_S = 1200
 KEYED_ROLES = {"concierge", "thread", "maintainer"}
 RATE_RE = re.compile(r"rate.?limit|usage limit|too many requests|\b429\b|overloaded|limit reached|"
                      r"resets? at|quota|out of (extra )?usage", re.I)
@@ -37,7 +36,7 @@ SECRET_ENV = ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "SHADEFORM_API_KEY", "VAST_
 READONLY_TOOLS = [
     "Read", "Grep", "Glob", "WebFetch", "WebSearch",
     "Bash(lab status*)", "Bash(lab world*)", "Bash(lab events*)",
-    "Bash(lab ticket*)", "Bash(lab idea list*)", "Bash(lab idea add*)", "Bash(lab thread list*)",
+    "Bash(lab ticket*)", "Bash(lab idea list*)", "Bash(lab idea show*)", "Bash(lab idea suggest*)", "Bash(lab thread list*)",
     "Bash(lab thread show*)", "Bash(lab thread note*)", "Bash(lab maint list*)", "Bash(lab maint show*)",
     "Bash(lab budget*)", "Bash(lab runs*)", "Bash(lab gpu list*)", "Bash(lab gpu stock*)",
     "Bash(ls*)", "Bash(cat *)", "Bash(head *)", "Bash(tail *)", "Bash(grep *)", "Bash(rg *)", "Bash(wc *)",
@@ -160,9 +159,9 @@ class Agents:
         # debounce: wait until the burst has been quiet for debounce_s
         if role.debounce_s and now() - evs[-1]["ts"] < role.debounce_s:
             return
-        # the Director decides on World State: let a pending Scout update land first (bounded, so a stuck
-        # Scout cannot hold up people's requests)
-        if role.name == "director" and now() - evs[0]["ts"] < DIRECTOR_WAITS_FOR_SCOUT_S and self._scout_pending(p):
+        # the Researcher reasons on World State: let a pending Scout update land first (bounded, so a stuck
+        # Scout cannot hold up the threads' questions)
+        if role.name == "researcher" and now() - evs[0]["ts"] < RESEARCHER_WAITS_FOR_SCOUT_S and self._scout_pending(p):
             return
         self._queue(p, role, key, evs)
 
@@ -223,7 +222,7 @@ class Agents:
 
     def launch(self) -> None:
         """Start queued runs by priority. Research threads, the concierge and the thinking roles have
-        separate slot pools, so threads (each on its own pods) never wait for each other or the Director."""
+        separate slot pools, so threads (each on its own pods) never wait for each other or the Researcher."""
         if self.backoff_until() > now():
             return
         rows = self.db.all("SELECT * FROM agent_runs WHERE status='queued' ORDER BY id")
@@ -294,20 +293,20 @@ class Agents:
         return text
 
     def user_prompt(self, p: Project, role: RoleConfig, key: str, evs) -> str:
+        """Each role sees only what its job needs; everything else is one `lab …` command or file away."""
         db, name = self.db, p.name
         since_day = now() - 86400
         head = [f"You are the **{role.name}** of the {name} lab. Wake time: {now():.0f} "
                 f"({time.strftime('%Y-%m-%d %H:%M %Z')})."]
-        payload_limit = {"scout": 20000, "concierge": 1500, "thread": 4000}.get(role.name, 2500)
+        payload_limit = {"scout": 20000, "concierge": 1500, "thread": 4000, "researcher": 6000}.get(role.name, 2500)
         head += ["", "## Why you were woken", fmt_events(evs, payload_limit)]
-        world_state = read(p.world_dir / "STATE.md", STATE_LIMIT)
         if role.name == "concierge":
             ev = evs[-1]
             msg = json.loads(ev["payload"] or "{}")
-            hist = db.all("SELECT * FROM discord_messages WHERE project=? ORDER BY ts DESC LIMIT 30", (name,))
+            hist = db.all("SELECT * FROM discord_messages WHERE project=? ORDER BY ts DESC LIMIT 15", (name,))
             convo = "\n".join(f"[{time.strftime('%m-%d %H:%M', time.localtime(m['ts']))}] "
                               f"{m['author_name']}{' (bot)' if m['is_bot'] else ''} (msg {m['id']}"
-                              f"{', reply to ' + m['reply_to'] if m['reply_to'] else ''}): {m['content'][:1200]}"
+                              f"{', reply to ' + m['reply_to'] if m['reply_to'] else ''}): {m['content'][:600]}"
                               for m in reversed(hist))
             head += ["", "## The request you must answer",
                      f"From **{msg.get('author_name')}** (Discord id {msg.get('author_id')}), message id {msg.get('id')}:",
@@ -316,14 +315,30 @@ class Agents:
                 head += ["It replies to this earlier bot message:", "> " + msg["reply_to_content"][:3000].replace("\n", "\n> ")]
             head += ["", "## Recent channel conversation (oldest first)", convo or "(none)",
                      "", "## Lab status", status_text(db, self.cfg, p),
-                     "", "## World State (STATE.md)", world_state]
+                     "", "## World State summary", state_head(p)]
         elif role.name == "scout":
             head += ["", "## Current world.json facts", world_now(db, p),
-                     "", "## Current STATE.md", world_state,
-                     "", "## Current KNOWN_STALE.md", read(p.world_dir / "KNOWN_STALE.md", 6000),
-                     "", "## Research threads (tell the Director if a change affects them)", threads_table(db, name)]
+                     "", "## Your files",
+                     "- " + file_ref(p.world_dir / "STATE.md", "World State, which you keep current"),
+                     "- " + file_ref(p.world_dir / "KNOWN_STALE.md", "local files that contradict the world"),
+                     "", "## STATE.md's summary as it stands", state_head(p),
+                     "", "## Threads and their tasks (name any your change affects)", threads_table(db, name)]
         elif role.name == "thread":
-            head += self._thread_context(p, key)
+            head += self._thread_context(p, key, evs)
+        elif role.name == "researcher":
+            done = db.all("SELECT * FROM backlog WHERE project=? AND status IN ('done','rejected') "
+                          "ORDER BY COALESCE(done_at, created_at) DESC LIMIT 8", (name,))
+            head += ["", "## The shared research memory (yours to keep; every thread reads it)",
+                     file_ref(research_doc(p), "your memory between wakes: read it first"),
+                     "", "## Open ideas", backlog_table(db, name, spec=600),
+                     "", "## Recently closed ideas (newest first)",
+                     "\n".join(f"- idea {r['id']} [{r['status']}] {r['title']}: "
+                               + " ".join((r["result"] or r["notes"] or "").split())[:400] for r in done) or "(none)",
+                     "", f"## Threads (at most {p.max_threads}; labd hands ready ideas to idle threads)",
+                     threads_table(db, name),
+                     "", "## Latest results (all threads)", results_table(db, name, limit=15),
+                     "", "## World now (live facts)", world_now(db, p),
+                     "", "## World State summary", state_head(p)]
         elif role.name == "maintainer":
             m = self.maint.get(key) or {"author": "?", "request": "(no such request)", "context": None,
                                         "branch": None, "base_sha": None}
@@ -336,22 +351,9 @@ class Agents:
                      f"live lab's HEAD {(m['base_sha'] or '')[:10]}. The live lab `{self.cfg.root}` is read-only for you.",
                      "", "## Earlier maintainer requests", self.maint.status_text(),
                      "", "## Lab status", status_text(db, self.cfg, p)]
-        elif role.name == "director":
-            head += ["", "## GOAL", read(p.dir / "GOAL.md", 6000),
-                     "", "## Your journal (tail)",
-                     "\n".join(read(p.work_dir / "director" / "JOURNAL.md", 60000).splitlines()[-60:]),
-                     "", f"## Research threads (at most {p.max_threads} active)", threads_table(db, name),
-                     "", "## Latest results (all threads)", results_table(db, name, limit=25),
-                     "", "## Open tickets from people", tickets_table(db, name),
-                     "", "## Ideas", backlog_table(db, name),
-                     "", "## GPU leases", leases_table(db, name),
-                     "", "## World now (live facts from world.json)", world_now(db, p),
-                     "", "## World State", world_state,
-                     "", "## Events in the last 24h (normal+)", events_digest(db, name, since_day, "normal", 60)]
         elif role.name == "analyst":
             daily = any(r["topic"] == "tick.daily_report" for r in evs)
-            head += ["", "## World State", world_state,
-                     "", "## Research threads", threads_table(db, name),
+            head += ["", "## World State summary", state_head(p),
                      "", "## Lab status", status_text(db, self.cfg, p)]
             if daily:
                 last = float(db.kv_get(name, "last_daily_report", 0) or since_day)
@@ -361,20 +363,28 @@ class Agents:
                 head += ["", "## Latest results", results_table(db, name, limit=30)]
         return "\n".join(head)
 
-    def _thread_context(self, p: Project, tid: str) -> list[str]:
-        """Resumed passes already remember everything: give them only what is new. A fresh session
-        (first pass, or after a lost session) gets the whole picture."""
+    def _thread_context(self, p: Project, tid: str, evs=()) -> list[str]:
+        """Resumed passes already remember everything: give them only what is new (a new task in full).
+        A fresh session (first pass, or after rotation) gets its task, handover and notes."""
         db, name = self.db, p.name
         t = db.one("SELECT * FROM threads WHERE id=?", (tid,))
         wd = role_workdir(p, "thread", tid)
-        live = [f"## Thread {tid}: {t['title']}  (pass {t['passes'] + 1}, spent ${t['spent_usd'] or 0:.2f}, "
+        task = f"idea {t['task_id']}" if t["task_id"] else "no task (report done; wait for the next one)"
+        live = [f"## Thread {tid} — {task}: {t['title']}  (pass {t['passes'] + 1}, spent ${t['spent_usd'] or 0:.2f}, "
                 f"best {t['metric'] or 'metric'} = {t['best_value'] if t['best_value'] is not None else '—'})",
                 "", "## Your GPU leases", leases_table(db, name, holder=tid),
                 "", "## Your last results", results_table(db, name, thread=tid, limit=8),
                 "", "## Budget", status_text(db, self.cfg, p).splitlines()[1]]
+        new_task = any(e["topic"] == "thread.task" for e in evs)
         if t["session_id"] and t["session_passes"]:
-            out = [""] + live + ["", "(You are resuming your own session; your earlier passes are above in "
-                                 "this conversation. program.md and NOTES.md are in your working directory.)"]
+            out = [""] + live
+            if new_task:
+                out += ["", "## Your new task (TASK.md)", read(wd / "TASK.md", 12000)]
+            if self._research_changed(p, tid):
+                out += ["", "## The shared research memory changed since your last pass (RESEARCH.md)",
+                        read(research_doc(p), 15000)]
+            out += ["", "(You are resuming your own session; your earlier passes are above in this conversation. "
+                        "TASK.md and NOTES.md are in your working directory.)"]
             out += self._world_news(p, tid, fresh=False)
             if t["rotate_pending"]:
                 out += ["", HANDOVER_ASK.format(k=(t["context_tokens"] or 0) // 1000)]
@@ -386,15 +396,27 @@ class Agents:
         if (wd / "HANDOVER.md").exists():
             fresh += ["", "## Handover from your previous session (HANDOVER.md)", read(wd / "HANDOVER.md", 12000)]
         reports = db.all("SELECT * FROM agent_runs WHERE role='thread' AND key=? AND status='ok' AND result IS NOT NULL "
-                         "ORDER BY id DESC LIMIT 3", (tid,))
-        return fresh + ["", "## Your charter (program.md)", read(wd / "program.md", 12000),
-                "", "## Your notes (NOTES.md, tail)", "\n".join(read(wd / "NOTES.md", 40000).splitlines()[-80:]),
+                         "ORDER BY id DESC LIMIT 2", (tid,))
+        charter = wd / "TASK.md" if (wd / "TASK.md").exists() else wd / "program.md"
+        self._research_changed(p, tid)       # seen now
+        return fresh + ["", "## The shared research memory (RESEARCH.md: what we optimise, what we know)",
+                        read(research_doc(p), 15000),
+                        "", f"## Your task ({charter.name})", read(charter, 12000),
+                "", "## Your notes (NOTES.md, tail)", "\n".join(read(wd / "NOTES.md", 40000).splitlines()[-40:]),
                 "", "## Your last pass reports (newest first)",
-                "\n\n".join(f"### run {r['id']} ({iso(r['ended_at'])})\n{(r['result'] or '')[:2000]}" for r in reports)
+                "\n\n".join(f"### run {r['id']} ({iso(r['ended_at'])})\n{(r['result'] or '')[:1500]}" for r in reports)
                 or "(none)",
-                "", "## GOAL of the lab", read(p.dir / "GOAL.md", 6000),
-                "", "## World State", read(p.world_dir / "STATE.md", STATE_LIMIT)] \
-            + self._world_news(p, tid, fresh=True) + ["", "## Other threads", threads_table(db, name), ""] + live
+                "", "## World State summary", state_head(p)] \
+            + self._world_news(p, tid, fresh=True) + ["", ""] + live
+
+    def _research_changed(self, p: Project, tid: str) -> bool:
+        """True once per change of RESEARCH.md for this thread (a resumed session never re-reads files by itself)."""
+        f = research_doc(p)
+        stamp = f.stat().st_mtime_ns if f.exists() else 0
+        if not stamp or self.db.kv_get(p.name, f"research_seen:{tid}") == stamp:
+            return False
+        self.db.kv_set(p.name, f"research_seen:{tid}", stamp)
+        return True
 
     def _world_news(self, p: Project, tid: str, fresh: bool) -> list[str]:
         """The rules move under a long-lived session (a resumed pass never re-reads STATE.md), so every
@@ -416,7 +438,7 @@ class Agents:
         return out
 
     # ------------------------------------------------------------ run
-    def _settings(self, role: RoleConfig) -> dict:
+    def _settings(self, role: RoleConfig, p: Project | None = None) -> dict:
         guard = str(lab_bin_dir(self.cfg) / "lab-guard")
         s: dict = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": guard}]}]},
                    "permissions": {"deny": [
@@ -426,13 +448,21 @@ class Agents:
                        "Edit(~/Work/lab/projects/*/project.toml)", "Write(~/Work/lab/lab/**)",
                        "Write(~/Work/lab/lab.toml)", "Write(~/Work/lab/bin/**)", "Write(~/Work/lab/projects/*/project.toml)",
                        "mcp__runpod", "mcp__runpod-docs",
-                   ]}}
+                   ]},
+                   # memory is the lab's files and registries: no per-cwd auto-memory to load or write
+                   "autoMemoryEnabled": False}
+        if p is not None:
+            # the only CLAUDE.md an agent needs is its project's (the operators' rules and the goal): skip the
+            # ancestors' (the lab's developer notes, the workstation's) that Claude Code would load from the cwd up
+            s["claudeMdExcludes"] = [str(d / "CLAUDE.md") for d in p.dir.parents if (d / "CLAUDE.md").exists()]
         return s
 
     @staticmethod
-    def model_for(role: RoleConfig, evs) -> str:
-        """The role's light model when every wake event is routine, else its main model."""
-        if role.light_model and evs and all(topic_match(e["topic"], role.light_topics) for e in evs):
+    def model_for(role: RoleConfig, evs, session_tokens: int | None = None) -> str:
+        """The role's light model when every wake event is routine, else its main model. A resumed session
+        past LIGHT_MAX_CONTEXT stays on its main model: the light model would have to re-cache all of it."""
+        if role.light_model and evs and all(topic_match(e["topic"], role.light_topics) for e in evs) \
+                and (session_tokens or 0) <= LIGHT_MAX_CONTEXT:
             return role.light_model
         return role.model
 
@@ -443,8 +473,12 @@ class Agents:
                "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                "--add-dir", str(p.root), "--add-dir", str(p.dir),
                "--name", f"lab:{p.name}:{role.name}:{run_id}"]
+        if role.toolset:
+            cmd += ["--tools", ",".join(role.toolset)]
         if role.effort:
             cmd += ["--effort", role.effort]
+        if role.advisor and (model or role.model) == role.model:   # routine checks on the light model go without
+            cmd += ["--advisor", role.advisor]
         if session:
             sid, resume = session
             cmd += (["--resume", sid] if resume else ["--session-id", sid])
@@ -488,7 +522,7 @@ class Agents:
         prompt_file, out_file = base.with_suffix(".prompt.md"), base.with_suffix(".out.json")
         try:
             sys_file.write_text(self.system_prompt(p, role, workdir))
-            settings_file.write_text(json.dumps(self._settings(role), indent=1))
+            settings_file.write_text(json.dumps(self._settings(role, p if role.name != "maintainer" else None), indent=1))
             prompt = self.user_prompt(p, role, key, evs)
             prompt_file.write_text(prompt)
         except Exception as e:
@@ -505,7 +539,8 @@ class Agents:
                 session = (str(uuid.uuid4()), False)
                 self.db.update("threads", "id=?", (key,), session_id=session[0], session_cost=0)
         # the handover pass is written by the main model, never by a routine-check model
-        model = role.model if rotating else self.model_for(role, evs)
+        resumed_tokens = (t["context_tokens"] or 0) if role.name == "thread" and session and session[1] else 0
+        model = role.model if rotating else self.model_for(role, evs, resumed_tokens)
         self.db.update("agent_runs", "id=?", (run_id,), model=model)
         cmd = self.command(p, role, run_id, workdir, sys_file, settings_file, session, model)
         self.db.emit(p.name, "agent.started", f"{role.name}{'/' + key if key else ''} run {run_id}", key=key or None)

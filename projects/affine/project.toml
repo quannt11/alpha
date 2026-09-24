@@ -16,11 +16,13 @@ pools = ["research"]               # accounting label only; spend is also tracke
 
 [schedule]
 daily_report = "09:00"             # lab timezone; covers everything since the previous report
-director_tick_hours = 1            # the Director also wakes on every result, idea, request and world change
+research_tick_hours = 6            # the Researcher's review tick, only while no task is queued or running
+                                   # (it also wakes on every thread report/question, suggestion, brief, new king)
 
 [research]
-max_threads = 1                    # research threads (autonomous minds, each with its own GPUs) alive at once
+max_threads = 1                    # implementor threads alive at once (labd starts one for a ready idea if there is room)
 rotate_context_tokens = 150000     # past this, the thread writes HANDOVER.md and its next pass starts a fresh session
+idle_retire_hours = 24             # a thread without a task this long is retired
 
 [fleet]
 idle_stop_minutes = 20
@@ -62,6 +64,6 @@ upstream = 900
 our_hotkeys = []                   # add our ss58 hotkeys to get crown-expiry alerts
 crown_warn_hours = 12
 
-# Per-role overrides of lab/config.py DEFAULT_ROLES (models: threads = Fable 5.1, Director + claim checks = Opus 5.5, Concierge/Scout/daily report/routine checks = Sonnet 5), e.g.:
+# Per-role overrides of lab/config.py DEFAULT_ROLES (models: Researcher = Fable 5.1, threads = Opus 5.5 at medium effort with a Fable 5.1 advisor (`advisor = "..."`, "" for none), claim checks = Opus 5.5, Concierge/Scout/daily report/routine checks = Sonnet 5), e.g.:
 # [agents.thread]
 # timeout_s = 5400

@@ -5,8 +5,9 @@ It holds every credential, never calls an LLM itself, and runs these loops:
   agents     dispatch events to roles, launch `claude -p` runs by priority
   fleet      schedule experiments, grant/release GPU leases, bill, reap, watchdog
   discord    gateway listener (mentions / replies) + outbox sender + announcer
-  scheduler  daily report, director tick, thread continuations, bootstrap
-  threads    keep every research thread's loop going: NEXT: now | wait | sleep N
+  scheduler  daily report, research tick, thread continuations, bootstrap
+  research   hand the Researcher's ready ideas to threads, retire idle threads (lab/research.py)
+  threads    keep every busy thread's loop going: NEXT: now | wait | sleep N
 """
 from __future__ import annotations
 
@@ -20,9 +21,10 @@ import sys
 import time
 
 from . import config as config_mod
+from . import research
 from .agents import Agents
 from .budget import next_local
-from .context import live_world_version, state_version
+from .context import live_world_version, research_doc, state_version
 from .db import DB, now, topic_match
 from .discord import Destination, DiscordError, DiscordREST, Gateway, is_addressed_to_bot, strip_mention
 from .fleet import Fleet
@@ -43,7 +45,8 @@ ANNOUNCE = {
     "sentinel.error": "**Sentinel:** {summary}",
     "operator.pause": "**GPUs paused:** {summary}",
     "operator.resume": "**GPUs resumed:** {summary}",
-    "thread.start": "**New research thread:** {summary}",
+    "thread.start": "**New thread:** {summary}",
+    "thread.task": "**Thread task:** {summary}",
     "thread.retired": "**Thread retired:** {summary}",
     "thread.claim": "**Claimed result (the Analyst will check it):** {summary}",
     "thread.stalled": "**Thread looks stuck:** {summary}",
@@ -78,6 +81,9 @@ class Daemon:
                                         shadeform=self.shadeform, vast=self.vast)
             for d in (p.world_dir, p.work_dir):
                 d.mkdir(parents=True, exist_ok=True)
+            old = p.work_dir / "researcher" / "NOTEBOOK.md"    # the Researcher's notebook became the shared memory
+            if old.exists() and not research_doc(p).exists():
+                old.rename(research_doc(p))
 
     # ------------------------------------------------------------ discord out
     def _notifier(self, p):
@@ -132,7 +138,7 @@ class Daemon:
                 for r in rows:
                     tmpl = next((t for k, t in ANNOUNCE.items() if topic_match(r["topic"], [k])), None)
                     loud = r["severity"] == "major" or r["topic"] in (
-                        "agent.ratelimited", "sentinel.error", "thread.start", "thread.retired", "thread.stalled")
+                        "agent.ratelimited", "sentinel.error", "thread.task", "thread.retired", "thread.stalled")
                     if tmpl and loud:
                         self.say(p.name, tmpl.format(summary=r["summary"]))
                 if rows:
@@ -198,7 +204,7 @@ class Daemon:
             self._continue_thread(p, key, run, text)
         if role.name == "maintainer":
             await self.maint.finish(p, key, run, text)
-        if role.name in ("scout", "director", "analyst", "thread"):
+        if role.name in ("scout", "researcher", "analyst", "thread"):
             await self._commit_state(p, f"{role.name} run {run['id']}: {text.splitlines()[0][:80] if text else run['status']}")
         if role.name == "analyst":
             ids = json.loads(run["event_ids"] or "[]")
@@ -212,15 +218,19 @@ class Daemon:
         """Autoresearch loop: decide when this thread's next pass runs.
         NEXT: now → right away; NEXT: wait → when its job/lease reports (plus a safety check);
         NEXT: sleep N → in N minutes. A pass that changed nothing backs off and, after several,
-        tells the Director the thread is stalled."""
+        tells the humans the thread is stalled. A thread without a task is not continued."""
         t = self.db.one("SELECT * FROM threads WHERE id=?", (tid,))
         if not t or t["status"] != "active":
+            return
+        if not t["task_id"]:      # task reported done: idle until labd hands it the next one
+            self.db.kv_set(p.name, f"wake:{tid}", 0)
+            self.db.kv_set(p.name, f"idle_streak:{tid}", 0)
             return
         started = run["started_at"] or now()
         productive = bool(
             self.db.one("SELECT 1 FROM results WHERE thread_id=? AND ts>=?", (tid, started))
             or self.db.one("SELECT 1 FROM events WHERE key=? AND ts>=? AND topic IN ('job.launched','thread.claim',"
-                           "'gpu.extended')", (tid, started))
+                           "'gpu.extended','thread.report','thread.question')", (tid, started))
             or self.db.one("SELECT 1 FROM leases WHERE COALESCE(holder, experiment_id)=? AND requested_at>=?",
                            (tid, started)))
         streak = 0 if productive else int(self.db.kv_get(p.name, f"idle_streak:{tid}", 0) or 0) + 1
@@ -255,9 +265,11 @@ class Daemon:
             return proc.returncode, (out + err).decode(errors="replace")
 
         await git("add", "--", *paths)
-        rc, _ = await git("diff", "--cached", "--quiet")
-        if rc == 1:
-            rc, out = await git("commit", "-q", "-m", f"[{p.name}] {message}")
+        _, out = await git("diff", "--cached", "--name-only", "-z", "--", *paths)
+        files = [f for f in out.split("\0") if f.strip()]
+        if files:
+            # only these files: whatever else someone has staged in the live tree is not ours to commit
+            rc, out = await git("commit", "-q", "-m", f"[{p.name}] {message}", "--", *files)
             if rc:
                 log.warning("state commit failed: %s", out[:300])
 
@@ -317,11 +329,7 @@ class Daemon:
                     self.db.emit(n, "tick.daily_report", "time for the daily report", severity="normal")
                     nr = next_local(tz, p.report_time, t + 60)
                 self.db.kv_set(n, "next_daily_report", nr)
-                nl = self.db.kv_get(n, "next_director") or t
-                if t >= nl:
-                    self.db.emit(n, "tick.director", "periodic portfolio review", severity="normal")
-                    nl = t + p.lead_tick_hours * 3600
-                self.db.kv_set(n, "next_director", nl)
+                self._research(p, t)
                 # research threads: fire due continuations
                 for th in self.db.all("SELECT id FROM threads WHERE project=? AND status='active'", (n,)):
                     due = float(self.db.kv_get(n, f"wake:{th['id']}", 0) or 0)
@@ -337,6 +345,26 @@ class Daemon:
                 self._resync_world(p, t)
             self.db.kv_set("_lab", "heartbeat", t)
             await self._sleep(10)
+
+    def _research(self, p, t: float) -> None:
+        """Plain-code dispatch (no LLM): ready ideas go to threads, idle threads retire, and the Researcher
+        gets a review tick only while the implementors have nothing to do."""
+        try:
+            for line in research.dispatch(self.db, p) + [f"{x} retired (idle)" for x in
+                                                         research.retire_idle(self.db, p, p.idle_retire_hours)]:
+                log.info("research: %s", line)
+        except Exception:
+            log.exception("research dispatch")
+        n = p.name
+        nr = self.db.kv_get(n, "next_research") or t
+        if t >= nr and p.research_tick_hours:
+            busy = self.db.one("SELECT 1 FROM agent_runs WHERE project=? AND role='researcher' AND status IN "
+                               "('queued','running')", (n,))
+            if research.research_idle(self.db, p) and not busy:
+                self.db.emit(n, "tick.research", "no task is queued or running: review and propose the next ideas",
+                             severity="normal")
+            nr = t + p.research_tick_hours * 3600
+        self.db.kv_set(n, "next_research", nr)
 
     RESYNC_AFTER_S, RESYNC_EVERY_S = 600, 1800
 

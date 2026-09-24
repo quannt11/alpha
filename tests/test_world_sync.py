@@ -52,27 +52,27 @@ def test_scout_is_woken_again_while_state_stays_behind(cfg):
     assert d.db.kv_get("affine", "world_lag_since") == 0
 
 
-def test_director_waits_for_a_pending_scout_update_but_not_forever(db, cfg):
+def test_researcher_waits_for_a_pending_scout_update_but_not_forever(db, cfg):
     a = Agents(db, cfg)
     a._cursor("affine", "scout", "")
-    a._cursor("affine", "director", "")
+    a._cursor("affine", "researcher", "")
     db.emit("affine", "world.change.contract", "wvk 24 → 25", severity="major")
-    db.emit("affine", "ticket.new", "test grpo on the king", severity="normal", key="1")
+    db.emit("affine", "research.suggestion", "test grpo on the king", severity="normal", key="1")
     db.x("UPDATE events SET ts=?", (now() - 120,))       # past both debounces
     a.dispatch()
     queued = lambda role: db.one("SELECT * FROM agent_runs WHERE role=? AND status IN ('queued','running')", (role,))
-    assert queued("scout") and not queued("director")
+    assert queued("scout") and not queued("researcher")
     db.x("UPDATE agent_runs SET status='ok' WHERE role='scout'")
     a.dispatch()
-    assert queued("director")
-    # a Scout that never finishes cannot hold the Director up
+    assert queued("researcher")
+    # a Scout that never finishes cannot hold the Researcher up
     db.x("UPDATE agent_runs SET status='ok'")
     db.emit("affine", "world.change.contract", "wvk 25 → 26", severity="major")
-    db.emit("affine", "ticket.new", "another request", severity="normal", key="2")
-    db.x("UPDATE events SET ts=? WHERE topic IN ('world.change.contract','ticket.new') AND id>2", (now() - 1300,))
+    db.emit("affine", "research.suggestion", "another request", severity="normal", key="2")
+    db.x("UPDATE events SET ts=? WHERE topic IN ('world.change.contract','research.suggestion') AND id>2", (now() - 1300,))
     db.insert("agent_runs", project="affine", role="scout", key="", status="running", queued_at=now())
     a.dispatch()
-    assert db.one("SELECT COUNT(*) n FROM agent_runs WHERE role='director'")["n"] == 2
+    assert db.one("SELECT COUNT(*) n FROM agent_runs WHERE role='researcher'")["n"] == 2
 
 
 def test_ideas_and_threads_written_under_older_rules_are_flagged(labdir, cfg, tmp_path):

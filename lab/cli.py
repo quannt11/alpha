@@ -23,7 +23,9 @@ from .context import (ago, backlog_table, events_digest, iso, leases_table, live
                       results_table, status_text, threads_table, tickets_table, world_now)
 from .db import DB, now
 from .fleet import ssh_base
+from . import research
 from .maint import Maint
+from .research import text_or_file
 from .sentinel import flatten
 
 ROLE = os.environ.get("LAB_ROLE", "human")
@@ -190,22 +192,53 @@ def cmd_ticket(c: Ctx, a):
 
 
 def cmd_backlog(c: Ctx, a):
-    if a.action == "add":
-        bid = c.db.insert("backlog", project=c.p.name, created_at=now(), author=ROLE, title=a.title,
-                          hypothesis=a.hypothesis, expected_gain=a.gain, est_cost_usd=a.cost, priority=a.priority,
-                          status="proposed", world_version=live_world_version(c.p))
-        c.db.emit(c.p.name, "idea.new", f"idea {bid} proposed by {ROLE}: {a.title}", severity="normal",
-                  key=str(bid))
-        print(f"idea {bid} added")
+    """Ideas are the Researcher's tasks for implementor threads (lifecycle in lab/research.py)."""
+    db, p = c.db, c.p
+    if a.action in ("add", "suggest"):
+        if not a.title:
+            die(f"idea {a.action} needs --title")
+        suggest = a.action == "suggest"
+        status = "suggested" if suggest else ("ready" if a.ready else "proposed")
+        bid = db.insert("backlog", project=p.name, created_at=now(), author=a.author or ROLE, title=a.title,
+                        hypothesis=a.hypothesis, expected_gain=a.gain, est_cost_usd=a.cost, priority=a.priority,
+                        status=status, world_version=live_world_version(p), spec=text_or_file(a.spec or a.body) or None,
+                        metric=a.metric, for_thread=a.thread, source_message=a.message)
+        if suggest:   # a person's idea: the Researcher weighs it
+            db.emit(p.name, "research.suggestion", f"idea {bid} suggested by {a.author or ROLE}: {a.title}",
+                    severity="normal", key=str(bid), payload={"idea": bid, "message_id": a.message})
+        else:
+            db.emit(p.name, "idea.new", f"idea {bid} [{status}] by {ROLE}: {a.title}", key=str(bid))
+        print(f"idea {bid} {status}" + (" — labd hands it to a thread" if status == "ready" else ""))
     elif a.action == "list":
-        print(backlog_table(c.db, c.p.name))
+        print(backlog_table(db, p.name, statuses=("suggested", "proposed", "ready", "assigned", "done", "rejected")
+                            if a.all else ("suggested", "proposed", "ready", "assigned")))
+    elif a.action == "show":
+        r = db.one("SELECT * FROM backlog WHERE id=? AND project=?", (a.id, p.name)) or die("no such idea")
+        for k in ("id", "status", "title", "author", "priority", "metric", "expected_gain", "hypothesis", "thread_id",
+                  "for_thread", "world_version", "notes", "spec", "result"):
+            if r[k] is not None:
+                print(f"{k}: {r[k]}")
     else:
-        status = {"accept": "accepted", "reject": "rejected", "done": "done"}[a.action]
-        n = c.db.update("backlog", "id=? AND project=?", (a.id, c.p.name), status=status,
-                        notes=a.note or None)
-        if not n:
-            die("no such idea")
-        print("ok")
+        r = db.one("SELECT * FROM backlog WHERE id=? AND project=?", (a.id, p.name)) or die("no such idea")
+        status = {"accept": "ready", "ready": "ready", "reject": "rejected", "done": "done", "edit": r["status"]}[a.action]
+        if a.action in ("ready", "accept", "edit") and r["status"] not in ("suggested", "proposed", "ready"):
+            die(f"idea {a.id} is {r['status']}; only suggested/proposed/ready ideas can be changed or queued")
+        cols = dict(status=status)
+        if a.action == "edit":
+            cols.update({k: v for k, v in (("title", a.title), ("expected_gain", a.gain), ("est_cost_usd", a.cost),
+                                           ("hypothesis", a.hypothesis)) if v is not None})
+            if a.priority != 50:
+                cols["priority"] = a.priority
+        if a.note:
+            cols["notes"] = ((r["notes"] or "") + f"\n[{iso(now())} {ROLE}] {a.note}").strip()
+        if a.spec or a.body:
+            cols["spec"] = text_or_file(a.spec or a.body)
+        if a.thread:
+            cols["for_thread"] = a.thread
+        if a.metric:
+            cols["metric"] = a.metric
+        db.update("backlog", "id=?", (a.id,), **cols)
+        print(f"idea {a.id} {status}" + (" — labd hands it to a thread" if status == "ready" else ""))
 
 
 # ---------------------------------------------------------------- research threads
@@ -220,32 +253,23 @@ def _holder(c: Ctx, a) -> str:
     return h
 
 
-def _text_or_file(v: str | None) -> str:
-    if v and len(v) < 4096 and Path(v).expanduser().is_file():
-        return Path(v).expanduser().read_text()
-    return v or ""
+_text_or_file = text_or_file
 
 
 def cmd_thread(c: Ctx, a):
     db, p = c.db, c.p
-    if a.action == "start":
+    if a.action == "start":   # humans: a thread with a first task (labd starts threads for ready ideas itself)
         n = db.one("SELECT COUNT(*) n FROM threads WHERE project=? AND status='active'", (p.name,))["n"]
         if n >= p.max_threads:
             die(f"{n} thread(s) already active; the limit is {p.max_threads}. Retire one first "
-                f"(`lab thread retire t-00N --text why`) or steer it (`lab thread note`).")
+                f"(`lab thread retire t-00N --text why`) or queue the task (`lab idea add --ready`).")
         if not a.title or not a.text:
-            die("thread start needs --title and --text (the charter: a file path or text)")
-        tid = db.next_thread_id(p.name)
-        wd = p.work_dir / "threads" / tid
-        wd.mkdir(parents=True, exist_ok=True)
-        (wd / "program.md").write_text(_text_or_file(a.text))
-        (wd / "NOTES.md").write_text(f"# {tid} — {a.title}\n\nMy notes across passes (newest last).\n")
-        (wd / "results.tsv").write_text("ts\trun\tmetric\tvalue\tkept\tcost_usd\tdescription\n")
-        db.insert("threads", id=tid, project=p.name, title=a.title, status="active", created_at=now(),
-                  created_by=ROLE, passes=0, metric=a.metric, workdir=str(wd), world_version=live_world_version(p))
-        db.emit(p.name, "thread.start", f"{tid} started by {ROLE}: {a.title}", severity="normal", key=tid,
-                payload={"title": a.title, "metric": a.metric})
-        print(f"{tid} started (workdir {wd}); its first pass begins now")
+            die("thread start needs --title and --text (the task: a file path or text)")
+        bid = db.insert("backlog", project=p.name, created_at=now(), author=a.author or ROLE, title=a.title,
+                        status="ready", world_version=live_world_version(p), spec=_text_or_file(a.text), metric=a.metric)
+        tid = research.start_thread(db, p, a.title, ROLE, a.metric)
+        research.assign(db, p, db.one("SELECT * FROM backlog WHERE id=?", (bid,)), tid)
+        print(f"{tid} started on idea {bid} (workdir {p.work_dir / 'threads' / tid}); its first pass begins now")
     elif a.action == "list":
         print(threads_table(db, p.name, include_retired=a.all))
     elif a.action == "show":
@@ -277,10 +301,23 @@ def cmd_thread(c: Ctx, a):
         t = db.one("SELECT * FROM threads WHERE id=? AND project=?", (a.id, p.name))
         if not t or t["status"] != "active":
             die(f"no active thread {a.id}")
-        _release_holder(db, a.id, stop=True, reason=f"thread retired by {ROLE}")
-        db.update("threads", "id=?", (a.id,), status="retired", retired_at=now(), retire_reason=a.text or "")
-        db.emit(p.name, "thread.retired", f"{a.id} retired by {ROLE}: {a.text or ''}", severity="normal", key=a.id)
+        research.retire(db, p, a.id, a.text or "", ROLE)
         print(f"{a.id} retired; its GPUs are released")
+    elif a.action in ("report", "ask"):
+        h = _holder(c, a)
+        text = _text_or_file(a.text)
+        if not text:
+            die(f"thread {a.action} needs --text (text or a file path)")
+        t = db.one("SELECT * FROM threads WHERE id=?", (h,))
+        topic = "thread.report" if a.action == "report" else "thread.question"
+        db.emit(p.name, topic, f"{h}{' (task done)' if a.done else ''} on idea {t['task_id'] or '-'}: {text[:300]}",
+                severity="normal", key=h, payload={"idea": t["task_id"], "text": text, "done": bool(a.done)})
+        if a.done:
+            idea = research.finish_task(db, p, h, text)
+            print(f"reported; idea {idea or '-'} is done and you are free for the next task. Release GPUs you no "
+                  f"longer need (`lab gpu release --stop`).")
+        else:
+            print("sent to the Researcher" + ("; its answer arrives as a message that wakes you" if a.action == "ask" else ""))
     elif a.action == "claim":
         h = _holder(c, a)
         if not a.text:
@@ -342,18 +379,7 @@ def cmd_result(c: Ctx, a):
 # ---------------------------------------------------------------- GPUs (leases are held by threads)
 
 
-def _release_holder(db: DB, holder: str, *, stop: bool, reason: str, lease_id: int | None = None):
-    q = "SELECT * FROM leases WHERE COALESCE(holder, experiment_id)=? AND status IN ('requested','provisioning','granted')"
-    args: list = [holder]
-    if lease_id:
-        q += " AND id=?"
-        args.append(lease_id)
-    for l in db.all(q, args):
-        if l["status"] == "requested":
-            db.update("leases", "id=?", (l["id"],), status="denied", reason=f"cancelled: {reason}")
-        else:
-            db.update("leases", "id=?", (l["id"],), status="release_requested", reason=reason,
-                      job_status=json.dumps({"stop_now": stop}))
+_release_holder = research.release_holder
 
 
 def _release_all(db: DB, exp_id: str, *, stop: bool, reason: str):
@@ -654,8 +680,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_ticket)
 
-    s = sub.add_parser("idea", aliases=["backlog"], help="ideas (research directions for the Director)")
-    s.add_argument("action", choices=["add", "list", "accept", "reject", "done"])
+    s = sub.add_parser("idea", aliases=["backlog"], help="research ideas: the Researcher's tasks for threads")
+    s.add_argument("action", choices=["add", "suggest", "list", "show", "edit", "ready", "accept", "reject", "done"])
     s.add_argument("id", nargs="?", type=int)
     s.add_argument("--title")
     s.add_argument("--hypothesis")
@@ -663,16 +689,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--cost", type=float)
     s.add_argument("--priority", type=int, default=50)
     s.add_argument("--note")
+    s.add_argument("--spec", help="the task for a thread: text or a file path")
+    s.add_argument("--body", help="suggest: what the person asked, with context")
+    s.add_argument("--metric", help="the number the task should move")
+    s.add_argument("--ready", action="store_true", help="add: queue it for a thread now")
+    s.add_argument("--thread", help="hand it to this thread (a follow-up keeps its session warm)")
+    s.add_argument("--author")
+    s.add_argument("--message", help="suggest: the Discord message id it came from")
+    s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_backlog)
 
-    s = sub.add_parser("thread", help="research threads (one mind each)")
-    s.add_argument("action", choices=["start", "list", "show", "note", "retire", "claim"])
+    s = sub.add_parser("thread", help="implementor threads (one session each, one task at a time)")
+    s.add_argument("action", choices=["start", "list", "show", "note", "retire", "claim", "report", "ask"])
     s.add_argument("id", nargs="?", help="thread id (note: an id or 'all')")
     s.add_argument("--title")
     s.add_argument("--text", help="charter / message / reason / claim (text or a file path)")
     s.add_argument("--metric", help="start: the number this thread optimises")
     s.add_argument("--author")
     s.add_argument("--holder")
+    s.add_argument("--done", action="store_true", help="report: the task is finished")
     s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_thread)
 
@@ -748,9 +783,9 @@ def main(argv=None):
         die("ticket new needs --title")
     if a.cmd == "ticket" and a.action in ("close", "note") and (not a.id or not a.text):
         die(f"ticket {a.action} needs ID and --text")
-    if a.cmd in ("idea", "backlog") and a.action == "add" and not (a.title and a.hypothesis):
-        die("idea add needs --title and --hypothesis")
-    if a.cmd in ("idea", "backlog") and a.action in ("accept", "reject", "done") and not a.id:
+    if a.cmd in ("idea", "backlog") and a.action == "add" and not (a.title and (a.hypothesis or a.spec)):
+        die("idea add needs --title and --spec (or --hypothesis)")
+    if a.cmd in ("idea", "backlog") and a.action in ("accept", "ready", "edit", "show", "reject", "done") and not a.id:
         die(f"idea {a.action} needs ID")
     if a.cmd == "thread" and a.action in ("show", "note", "retire") and not a.id:
         die(f"thread {a.action} needs a thread id")

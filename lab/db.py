@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS backlog (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project TEXT, created_at REAL, author TEXT, title TEXT, hypothesis TEXT,
   expected_gain TEXT, est_cost_usd REAL, priority INTEGER DEFAULT 50,
-  status TEXT DEFAULT 'proposed', -- proposed | accepted | rejected | done
+  status TEXT DEFAULT 'proposed', -- suggested | proposed | ready | assigned | done | rejected (lab/research.py)
   experiment_id TEXT, notes TEXT
 );
 
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS experiments (
 );
 
 CREATE TABLE IF NOT EXISTS threads (
-  id TEXT PRIMARY KEY,              -- t-001: one research mind (a Claude session) and its direction
+  id TEXT PRIMARY KEY,              -- t-001: one implementor (a Claude session) working through tasks
   project TEXT, title TEXT, status TEXT,   -- active | retired
   created_at REAL, created_by TEXT, retired_at REAL, retire_reason TEXT,
   session_id TEXT, passes INTEGER DEFAULT 0, last_pass_at REAL, metric TEXT,
@@ -161,6 +161,11 @@ class DB:
         ("threads", "context_tokens", "INTEGER"), ("threads", "rotate_pending", "INTEGER DEFAULT 0"),
         ("threads", "generation", "INTEGER DEFAULT 1"), ("leases", "provisioning_at", "REAL"),
         ("backlog", "world_version", "TEXT"), ("threads", "world_version", "TEXT"),
+        # the Researcher's ideas are tasks for implementor threads
+        ("backlog", "spec", "TEXT"), ("backlog", "metric", "TEXT"), ("backlog", "thread_id", "TEXT"),
+        ("backlog", "for_thread", "TEXT"), ("backlog", "assigned_at", "REAL"), ("backlog", "done_at", "REAL"),
+        ("backlog", "result", "TEXT"), ("backlog", "source_message", "TEXT"),
+        ("threads", "task_id", "INTEGER"), ("threads", "idle_since", "REAL"),
     ]
 
     def _migrate(self) -> None:
@@ -170,6 +175,8 @@ class DB:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
                 if (table, col) == ("threads", "session_passes"):  # existing sessions keep resuming
                     self.conn.execute("UPDATE threads SET session_passes=passes WHERE session_id IS NOT NULL")
+                if (table, col) == ("backlog", "spec"):  # the Director's accepted ideas wait for the Researcher
+                    self.conn.execute("UPDATE backlog SET status='proposed' WHERE status='accepted'")
 
     # ---- generic helpers -------------------------------------------------
     def x(self, sql: str, args: Iterable[Any] = ()) -> sqlite3.Cursor:

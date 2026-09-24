@@ -167,7 +167,7 @@ function when(ts) {
 const dur = (a, b) => { if (!a) return "—"; const s = (b || Date.now() / 1000) - a; return s < 90 ? Math.round(s) + "s" : s < 5400 ? Math.round(s / 60) + "m" : (s / 3600).toFixed(1) + "h"; };
 const tsCell = ts => `<span data-tip="${esc(when(ts))}">${esc(ago(ts))}</span>`;
 function statusPill(s) {
-  const m = { ok: "good", running: "info", queued: "", granted: "good", active: "good", sent: "good", deployed: "good", accepted: "good", done: "good", closed: "",
+  const m = { ok: "good", running: "info", queued: "", granted: "good", active: "good", sent: "good", deployed: "good", accepted: "good", ready: "good", assigned: "info", done: "good", closed: "",
               error: "critical", timeout: "critical", failed: "critical", rolled_back: "critical", denied: "warning", ratelimited: "warning",
               provisioning: "info", requested: "info", awaiting_approval: "warning", pending: "info", unknown: "warning", open: "warning",
               proposed: "info", retired: "", released: "", rejected: "", major: "critical", normal: "warning", minor: "info", info: "" };
@@ -353,9 +353,8 @@ V.overview = async () => {
       <div class="card"><h2>Running now</h2>${running || `<p class="muted">No agents running.</p>`}<h2 style="margin-top:14px">GPU leases</h2>${leases}</div>
       <div class="card"><h2>Active threads <a href="#threads" class="small">all</a></h2>${threads}
         <h2 style="margin-top:14px">Coming up</h2>
-        <dl class="kv"><dt>Director tick</dt><dd>${esc(when(sch.next_director))} (${esc(ago(sch.next_director))})</dd>
+        <dl class="kv"><dt>Research review</dt><dd>${esc(when(sch.next_research))} (${esc(ago(sch.next_research))}; only while no task is queued)</dd>
         <dt>Daily report</dt><dd>${esc(when(sch.next_daily_report))} (${esc(ago(sch.next_daily_report))})</dd>
-        ${sch.next_explore ? `<dt>Explore</dt><dd>${esc(when(sch.next_explore))}</dd>` : ""}
         ${o.backoff_until > Date.now() / 1000 ? `<dt>Rate-limit backoff</dt><dd>until ${esc(when(o.backoff_until))}</dd>` : ""}</dl></div>
     </div>
     <div class="grid cols-2">
@@ -560,8 +559,8 @@ V.inbox = async () => {
       ${t.status === "open" ? `<div class="row" style="margin-top:6px"><input id="tk-${t.id}" class="draft" placeholder="resolution" style="flex:1"><button onclick="closeTicket(${t.id})">Close</button></div>` : ""}</div>`).join("");
   const ideas = d.ideas.map(i => `<div class="list-item"><div class="row"><strong>idea ${i.id}</strong> ${statusPill(i.status)} <span class="small muted">p${i.priority} · ${esc(i.author || "")} · ${tsCell(i.created_at)}${i.est_cost_usd ? " · est " + money(i.est_cost_usd, 0) : ""}</span></div>
       <div><strong>${esc(i.title)}</strong></div>
-      <details ${S.open.has("i" + i.id) ? "open" : ""} data-k="i${i.id}"><summary class="small">hypothesis</summary><div class="small">${md(i.hypothesis)}${i.expected_gain ? `<p><strong>Expected gain:</strong> ${esc(i.expected_gain)}</p>` : ""}${i.notes ? `<p class="muted">Notes: ${esc(i.notes)}</p>` : ""}</div></details>
-      ${["proposed", "accepted"].includes(i.status) ? `<div class="row" style="margin-top:6px">${i.status === "proposed" ? `<button onclick="act({action:'idea_accept',id:'${i.id}'},'Accept idea ${i.id}?')">Accept</button>` : ""}
+      <details ${S.open.has("i" + i.id) ? "open" : ""} data-k="i${i.id}"><summary class="small">task</summary><div class="small">${md(i.spec || i.hypothesis)}${i.thread_id ? `<p><strong>Thread:</strong> ${esc(i.thread_id)}</p>` : ""}${i.result ? `<p><strong>Result:</strong> ${md(i.result)}</p>` : ""}${i.expected_gain ? `<p><strong>Expected gain:</strong> ${esc(i.expected_gain)}</p>` : ""}${i.notes ? `<p class="muted">Notes: ${esc(i.notes)}</p>` : ""}</div></details>
+      ${["suggested", "proposed", "ready"].includes(i.status) ? `<div class="row" style="margin-top:6px">${i.status !== "ready" ? `<button onclick="act({action:'idea_accept',id:'${i.id}'},'Queue idea ${i.id} for a thread?')">Make ready</button>` : ""}
         <button onclick="act({action:'idea_reject',id:'${i.id}'},'Reject idea ${i.id}?')">Reject</button><button onclick="act({action:'idea_done',id:'${i.id}'},'Mark idea ${i.id} done?')">Done</button></div>` : ""}</div>`).join("");
   return `<h1>Inbox</h1><div class="grid cols-2">
     <div class="stack">
@@ -570,7 +569,7 @@ V.inbox = async () => {
         <div class="row" style="margin-top:6px"><button class="primary" onclick="maintReq()">Request change</button></div></div>
       <div class="card"><h2>Tickets</h2>${tickets || `<p class="muted">None.</p>`}</div>
     </div>
-    <div class="card"><h2>Ideas (Director's backlog)</h2>${ideas || `<p class="muted">None.</p>`}</div></div>`;
+    <div class="card"><h2>Research ideas (tasks for threads)</h2>${ideas || `<p class="muted">None.</p>`}</div></div>`;
 };
 async function closeTicket(id) {
   const text = draftVal("tk-" + id); if (!text) return toast("Write a resolution first.", false);

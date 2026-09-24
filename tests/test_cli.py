@@ -30,9 +30,11 @@ def test_thread_start_creates_workdir_and_wakes_it(labdir, cfg, thread):
     t = db.one("SELECT * FROM threads WHERE id='t-001'")
     assert t["status"] == "active" and t["metric"] == "abs_err_sd"
     wd = Path(t["workdir"])
-    assert "harness fidelity" in (wd / "program.md").read_text() and (wd / "results.tsv").exists()
-    ev = db.one("SELECT * FROM events WHERE topic='thread.start'")
-    assert ev["key"] == "t-001"
+    assert "harness fidelity" in (wd / "TASK.md").read_text() and (wd / "results.tsv").exists()
+    assert db.one("SELECT * FROM events WHERE topic='thread.start'")["key"] == "t-001"
+    assert db.one("SELECT * FROM events WHERE topic='thread.task'")["key"] == "t-001"     # the wake
+    idea = db.one("SELECT * FROM backlog")
+    assert idea["status"] == "assigned" and idea["thread_id"] == "t-001" and t["task_id"] == idea["id"]
 
 
 def test_max_threads_enforced(labdir, cfg, thread, monkeypatch):

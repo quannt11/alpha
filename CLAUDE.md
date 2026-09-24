@@ -6,12 +6,12 @@ Read `README.md` first for the design; this file is how to change it safely.
 
 ## Layout
 - `lab/` — the control plane (Python, asyncio, no LLM calls): `daemon.py` (loops, Discord in/out),
-  `agents.py` (dispatch + `claude -p` runs, thread sessions and rotation), `fleet.py` (GPU leases, pods,
+  `agents.py` (dispatch + `claude -p` runs, thread sessions and rotation), `research.py` (ideas → thread tasks), `fleet.py` (GPU leases, pods,
   watchdog), `budget.py`, `sentinel.py` (world polling), `context.py` (prompt sections), `cli.py` (`lab`),
   `db.py` (SQLite schema + `MIGRATIONS`), `config.py` (`DEFAULT_ROLES`, models, config parsing).
 - `bin/` — `lab`, `labd`, `lab-guard` (PreToolUse hook for every agent), `labrun` (job wrapper on pods).
-- `lab.toml` — global config. `projects/<name>/project.toml`, `plugin.py`, `prompts/*.md`, `GOAL.md`.
-  `projects/<name>/CLAUDE.md` = operators' rules for that project (Claude Code loads it for every agent under
+- `lab.toml` — global config. `projects/<name>/project.toml`, `plugin.py`, `prompts/*.md`, `TASK_TEMPLATE.md`.
+  `projects/<name>/CLAUDE.md` = the project's goal and operators' rules (Claude Code loads it for every agent under
   the folder; read-only for agents, approval-gated for `maint:`).
 - `projects/*/work/` and `projects/*/world/` — the agents' research notes and World State. labd commits
   them automatically after agent runs (`[affine] …` commits). Don't edit or reformat them.
@@ -43,8 +43,9 @@ Read `README.md` first for the design; this file is how to change it safely.
   `bin/lab-guard` intact (it is a seatbelt, not isolation — agents run as the same Unix user).
 - Nothing is pushed to `~/Work/affine` remotes (AffineFoundation/affine is public). Submitting to the
   subnet, registering hotkeys or moving TAO is a human decision.
-- Models: research threads Fable 5.1 (`claude-fable-5-1`); Director and claim checks Opus 5.5
-  (`claude-opus-5-5`); concierge, scout, daily report, routine checks and all subagents Sonnet 5.
+- Models: the Researcher Fable 5.1 (`claude-fable-5-1`); implementor threads (effort medium, `--advisor`
+  Fable 5.1) and claim checks Opus 5.5 (`claude-opus-5-5`); concierge, scout, daily report, routine checks and all subagents Sonnet 5.
+  There is no Director: labd hands the Researcher's ready ideas to threads in code (`lab/research.py`).
 
 ## Publishing to github.com/trungvd-zenai/alpha (only when the operator asks)
 The public repo is **code only**: never `projects/*/work/`, `projects/*/world/`, `lab.db`, secrets,

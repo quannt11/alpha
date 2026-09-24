@@ -96,7 +96,7 @@ async def test_scheduler_bootstrap_and_ticks(cfg):
 
 def _thread(d, tid="t-001"):
     d.db.insert("threads", id=tid, project="affine", title="x", status="active", created_at=now(), passes=1,
-                workdir="/tmp")
+                workdir="/tmp", task_id=1)
 
 
 def _run(d, tid="t-001", status="ok", started=None):
@@ -140,4 +140,24 @@ async def test_scheduler_fires_due_thread_wakes(cfg):
     await task
     ev = d.db.one("SELECT * FROM events WHERE topic='thread.continue'")
     assert ev and ev["key"] == "t-001" and d.db.kv_get("affine", "wake:t-001") == 0
-    assert d.db.one("SELECT 1 FROM events WHERE topic='tick.director'")
+    assert d.db.one("SELECT 1 FROM events WHERE topic='tick.research'") is None   # a thread is busy: no review tick
+
+
+async def test_state_commit_leaves_other_staged_changes_alone(cfg):
+    import subprocess
+    root = cfg.root
+    g = lambda *a: subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                  capture_output=True, text=True, check=True).stdout
+    g("init", "-q")
+    g("config", "user.name", "t")
+    g("config", "user.email", "t@t")
+    (root / "README.md").write_text("x")
+    g("add", "README.md")
+    g("commit", "-qm", "init")
+    d = make(cfg)
+    p = cfg.project("affine")
+    g("rm", "-q", "README.md")                             # someone's unrelated work in progress, staged
+    (p.work_dir / "note.md").write_text("agent note")
+    await d._commit_state(p, "scout run 1")
+    assert g("show", "--stat", "--format=%s", "HEAD").count("README.md") == 0
+    assert "note.md" in g("show", "--stat", "HEAD") and "D  README.md" in g("status", "--short")

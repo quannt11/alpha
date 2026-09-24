@@ -144,6 +144,7 @@ def threads_table(db: DB, project: str, include_retired: bool = False) -> str:
                    f"spent ${t['spent_usd'] or 0:.2f}; last pass {ago(t['last_pass_at'])}; session {t['generation'] or 1}"
                    + (f" at {t['context_tokens'] // 1000}k tokens" if t["context_tokens"] else "")
                    + (" (handover next pass)" if t["rotate_pending"] else "")
+                   + (f"; on idea {t['task_id']}" if t["task_id"] else f"; idle since {ago(t['idle_since'])}")
                    + rules_note(db, project, t["world_version"], "chartered"))
     return "\n".join(out)
 
@@ -176,13 +177,16 @@ def activity_digest(db: DB, cfg, project, since: float) -> str:
                    "GROUP BY h ORDER BY s DESC", (name, since))
     parts += ["", "### GPU spend by holder", "\n".join(f"- {r['h']}: ${r['s']:.2f}" for r in spend) or "(none)"]
     runs = db.all("SELECT * FROM agent_runs WHERE project=? AND started_at>=? ORDER BY id", (name, since))
-    parts += ["", f"### Agent passes ({len(runs)})"]
+    chat = [r for r in runs if r["role"] == "concierge"]      # their answers are already in the channel
+    parts += ["", f"### Agent passes ({len(runs)}; {len(chat)} Concierge answers not listed)"]
     for r in runs:
-        summary = (r["result"] or r["error"] or "").strip().replace("\n", " ")[:400]
+        if r["role"] == "concierge":
+            continue
+        summary = " ".join((r["result"] or r["error"] or "").split())[:240]
         parts.append(f"- {iso(r['started_at'])} {r['role']}{'/' + r['key'] if r['key'] else ''} [{r['status']}]: {summary}")
     decisions = db.all("SELECT * FROM events WHERE project=? AND ts>=? AND (topic LIKE 'thread.%' OR topic LIKE "
                        "'idea.%' OR topic LIKE 'ticket.%' OR topic LIKE 'world.brief%' OR topic LIKE 'board.%' OR "
-                       "topic LIKE 'budget.%' OR topic LIKE 'operator.%') AND topic NOT IN ('thread.continue') "
+                       "topic LIKE 'budget.%' OR topic LIKE 'operator.%') AND topic NOT IN ('thread.continue', 'thread.log') "
                        "ORDER BY id", (name, since))
     parts += ["", "### Decisions, requests and world changes"]
     parts += [f"- {iso(e['ts'])} {e['topic']}{' ' + e['key'] if e['key'] else ''}: {e['summary'][:300]}"
@@ -198,14 +202,50 @@ def tickets_table(db: DB, project: str, status: str = "open") -> str:
                      for r in rows)
 
 
-def backlog_table(db: DB, project: str) -> str:
-    rows = db.all("SELECT * FROM backlog WHERE project=? AND status IN ('proposed','accepted') "
-                  "ORDER BY priority, id", (project,))
+def backlog_table(db: DB, project: str, statuses=("suggested", "proposed", "ready", "assigned"), spec: int = 0) -> str:
+    """Open ideas; `spec` > 0 adds the first `spec` characters of each one's task text."""
+    rows = db.all(f"SELECT * FROM backlog WHERE project=? AND status IN ({','.join('?' * len(statuses))}) "
+                  "ORDER BY CASE status WHEN 'assigned' THEN 0 WHEN 'ready' THEN 1 WHEN 'suggested' THEN 2 ELSE 3 END, "
+                  "priority, id", (project, *statuses))
     if not rows:
         return "(empty)"
-    return "\n".join(f"- idea {r['id']} [{r['status']}] p{r['priority']} {r['title']} — gain: {r['expected_gain']}; "
-                     f"est ${r['est_cost_usd'] or 0:.0f}; by {r['author']}"
-                     + rules_note(db, project, r["world_version"], "written") for r in rows)
+    out = []
+    for r in rows:
+        line = (f"- idea {r['id']} [{r['status']}{' → ' + r['thread_id'] if r['thread_id'] else ''}"
+                f"{' for ' + r['for_thread'] if r['for_thread'] and not r['thread_id'] else ''}] p{r['priority']} "
+                f"{r['title']} — by {r['author']}" + (f"; gain: {r['expected_gain']}" if r["expected_gain"] else "")
+                + rules_note(db, project, r["world_version"], "written"))
+        body = (r["spec"] or r["hypothesis"] or "").strip()
+        if spec and body:
+            line += "\n  " + (body[:spec] + ("…" if len(body) > spec else "")).replace("\n", "\n  ")
+        out.append(line)
+    return "\n".join(out)
+
+
+def research_doc(project) -> Path:
+    """The shared research memory: the Researcher writes it, every thread (and its advisor) reads it."""
+    return project.work_dir / "RESEARCH.md"
+
+
+def file_ref(path: Path, what: str) -> str:
+    """Point to a file the agent will edit instead of pasting it: Claude Code makes it Read the file before
+    an Edit/Write anyway, so a copy in the prompt would be read twice."""
+    if not path.exists():
+        return f"`{path}` does not exist yet — {what}"
+    t = path.read_text(errors="replace")
+    return (f"`{path}` ({len(t):,} chars, last changed {iso(path.stat().st_mtime)}) — {what}. "
+            "It is not pasted here: Read it (you must before editing it).")
+
+
+def state_head(project) -> str:
+    """STATE.md up to its first section: the version line and the Scout's short summary of the rules."""
+    st = project.world_dir / "STATE.md"
+    if not st.exists():
+        return "(STATE.md does not exist yet)"
+    t = st.read_text(errors="replace")
+    i = t.find("\n## ")
+    head = (t if i < 0 else t[:i]).strip()[:4000]
+    return head + f"\n(Full rules by section: `{st}` — read the sections you need.)"
 
 
 def events_digest(db: DB, project: str, since: float, min_sev: str = "info", limit: int = 80) -> str:
@@ -247,7 +287,7 @@ def status_text(db: DB, cfg, project) -> str:
         "", "## World", world_now(db, project),
         "", "## Research threads", threads_table(db, project.name),
         "", "## GPU leases", leases_table(db, project.name),
-        "", "## Open tickets", tickets_table(db, project.name),
+        *(["", "## Open tickets", tickets] if (tickets := tickets_table(db, project.name)) != "(none)" else []),
         *(["", "## Lab changes", changes] if changes else []),
-        "", "## Ideas", backlog_table(db, project.name),
+        "", "## Research ideas", backlog_table(db, project.name),
     ])

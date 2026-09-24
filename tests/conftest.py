@@ -38,7 +38,7 @@ def labdir(tmp_path, monkeypatch):
     (pdir / "project.toml").write_text(toml)
     shutil.copy(src / "plugin.py", pdir / "plugin.py")
     shutil.copytree(src / "prompts", pdir / "prompts")
-    shutil.copy(src / "GOAL.md", pdir / "GOAL.md")
+    shutil.copy(src / "TASK_TEMPLATE.md", pdir / "TASK_TEMPLATE.md")
     shutil.copy(src / "CLAUDE.md", pdir / "CLAUDE.md")
     (tmp_path / "code").mkdir()
     monkeypatch.setenv("LAB_CONFIG", str(tmp_path / "lab.toml"))

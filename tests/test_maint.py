@@ -125,9 +125,9 @@ async def test_deploy_waits_for_running_agents(lab):
     await d.maint.tick()
     assert d.maint.get("m-1")["status"] == "deploying"                 # waits…
     assert d.db.kv_get("_lab", "agents_hold_until") > 0                # …and starts nothing new but chat
-    d.db.insert("agent_runs", project="affine", role="director", key="", status="queued")
+    d.db.insert("agent_runs", project="affine", role="researcher", key="", status="queued")
     d.agents.launch()
-    assert d.db.one("SELECT status FROM agent_runs WHERE role='director'")["status"] == "queued"
+    assert d.db.one("SELECT status FROM agent_runs WHERE role='researcher'")["status"] == "queued"
     d.db.x("UPDATE agent_runs SET status='ok' WHERE role='thread'")
     await d.maint.tick()
     assert d.maint.get("m-1")["status"] == "restarting"

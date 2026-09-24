@@ -120,7 +120,7 @@ class Dash:
         recent = rows(db.all("SELECT id, ts, topic, severity, key, summary FROM events WHERE project=? AND "
                              "severity IN ('normal','major') AND topic NOT LIKE 'agent.%' ORDER BY id DESC LIMIT 15",
                              (p.name,)))
-        schedule = {k: db.kv_get(p.name, k) for k in ("next_director", "next_daily_report", "next_explore")}
+        schedule = {k: db.kv_get(p.name, k) for k in ("next_research", "next_daily_report")}
         return {
             "project": p.name, "projects": list(self.cfg.projects), "now": t, "timezone": self.cfg.timezone,
             "heartbeat": hb, "service": service_state(),
@@ -135,7 +135,7 @@ class Dash:
                        "max_threads": p.max_threads, "test_mode": p.test_mode},
             "counts": {
                 "tickets": db.one("SELECT COUNT(*) n FROM tickets WHERE project=? AND status='open'", (p.name,))["n"],
-                "ideas": db.one("SELECT COUNT(*) n FROM backlog WHERE project=? AND status='proposed'", (p.name,))["n"],
+                "ideas": db.one("SELECT COUNT(*) n FROM backlog WHERE project=? AND status IN ('suggested','proposed','ready')", (p.name,))["n"],
                 "maint": db.one(f"SELECT COUNT(*) n FROM maint WHERE status IN ({','.join('?' * len(MAINT_IN_FLIGHT))})",
                                 MAINT_IN_FLIGHT)["n"],
             },
@@ -387,8 +387,9 @@ class Dash:
         return {
             "tickets": rows(db.all("SELECT * FROM tickets WHERE project=? ORDER BY status='open' DESC, id DESC LIMIT 60",
                                    (p.name,))),
-            "ideas": rows(db.all("SELECT * FROM backlog WHERE project=? ORDER BY CASE status WHEN 'proposed' THEN 0 "
-                                 "WHEN 'accepted' THEN 1 ELSE 2 END, priority, id DESC LIMIT 80", (p.name,))),
+            "ideas": rows(db.all("SELECT * FROM backlog WHERE project=? ORDER BY CASE status WHEN 'assigned' THEN 0 "
+                                 "WHEN 'ready' THEN 1 WHEN 'suggested' THEN 2 WHEN 'proposed' THEN 3 ELSE 4 END, "
+                                 "priority, id DESC LIMIT 80", (p.name,))),
             "maint": rows(db.all("SELECT * FROM maint ORDER BY created_at DESC LIMIT 40")),
         }
 

@@ -7,7 +7,7 @@ session every pass. State lives in SQLite (`~/.local/state/lab/lab.db`) and in f
 `projects/<name>/`.
 
 ```
-Sentinel ──diffs──▶ events ──▶ dispatcher ──▶ Concierge · Scout · Director · Thread×N · Analyst
+Sentinel ──diffs──▶ events ──▶ dispatcher ──▶ Concierge · Scout · Researcher · Thread×N · Analyst
    (affine.io, llms.txt, code/, corpus,          (headless Claude, guarded by bin/lab-guard)
     curriculum, board, verdicts, audits)                  │  lab CLI (no secrets)
                                                           ▼
@@ -18,12 +18,38 @@ Every agent's subagents run on Sonnet 5 (`CLAUDE_CODE_SUBAGENT_MODEL`).
 
 | Role | Model | Woken by | Does |
 |---|---|---|---|
-| thread | Fable 5.1 (routine job/lease checks: Sonnet 5, same session) | its own loop (`NEXT: now/wait/sleep`), its job finishing/failing, lease changes, messages | one autonomous research mind: owns a direction, edits code, rents/releases its own GPUs, runs experiments, keeps or reverts, logs `results.tsv` — forever, like autoresearch. Resumes the same Claude session every pass; past `research.rotate_context_tokens` (150k) it writes `HANDOVER.md` and continues in a fresh session. |
-| director | Opus 5.5 | results, stalls, claims, people's ideas/tickets, briefs, new king, hourly | portfolio: starts / steers / retires threads (max `research.max_threads`), weighs human ideas |
+| researcher | Fable 5.1 | thread reports and questions, people's suggestions, briefs (normal+), new king, claim verdicts; a review tick every `schedule.research_tick_hours` (6) only while no task is queued or running | decides what to try: analyses the standing vs the king, reads papers and code, writes ideas with task specs, marks them `ready`, answers threads' strategic questions, keeps the shared research memory `work/RESEARCH.md`. Its prompt holds only ideas-related context. Fresh session per wake. |
+| thread | Opus 5.5, effort medium, **Fable 5.1 as in-loop advisor** (routine job/lease checks: Sonnet 5, same session, no advisor) | its task (`thread.task`), its own loop (`NEXT: now/wait/sleep`), its job finishing/failing, lease changes, messages | an implementor: takes one task (`TASK.md`) at a time, rents/releases its GPUs, implements, evaluates, logs results, reports back (`lab thread report [--done]`, `lab thread ask`). Resumes its own Claude session across tasks; past `research.rotate_context_tokens` (150k) it writes `HANDOVER.md` and continues in a fresh session. |
 | scout | Sonnet 5 | `world.change.*` (normal+) | updates `world/STATE.md`, `KNOWN_STALE.md`, publishes briefs |
 | analyst | Opus 5.5 (claims), Sonnet 5 (daily report) | `thread.claim`, 09:00 | red-teams claims; daily report of everything the agents did since the last one |
-| concierge | Sonnet 5 | @mention / reply in the channel | answers (read-only), forwards guidance to a thread, files ideas for the Director |
+| concierge | Sonnet 5 | @mention / reply in the channel | the router: answers status/ETA/world questions itself (read-only), sends research ideas to the Researcher (`lab idea suggest`), passes orders to a thread |
 | maintainer | Opus 5.5 | an operator's `maint: …` in Discord (or `lab maint request`) | changes the lab itself in its own git worktree, tests it, commits; labd deploys it (below) |
+
+**From idea to result (no Director; `lab/research.py`, plain code).** An idea is `suggested` (a person's, via
+the Concierge) or `proposed` (the Researcher's draft) → `ready` → `assigned` → `done` | `rejected`. labd hands
+ready ideas, by priority, to the thread the Researcher named (`--thread`, a follow-up keeps that session warm),
+else to an idle thread, else to a new thread while fewer than `research.max_threads` are active. A thread
+that reports `--done` goes idle (no GPU, no passes) until its next task; idle for `research.idle_retire_hours`
+(24) it is retired. Stalls and budget alerts go to Discord for the humans.
+
+**Advisor strategy and shared memory.** Threads run with `claude --advisor claude-fable-5-1` (the pattern of
+claude.com/blog/the-advisor-strategy): the executor drives the whole task and consults Fable inside the same
+request at hard decisions (run design, ambiguous results, stuck, before `--done`); the advisor sees the thread's
+conversation and returns a plan, correction or stop signal, never running tools. Its tokens are billed at Fable's
+rate and included in the pass's cost. What the advisor and the thread know about the research comes from
+`work/RESEARCH.md`, which the Researcher keeps (Objective first: the number we optimise, how it's measured, the
+bar to clear; then lessons, dead ends, open questions, literature). Every fresh thread session gets it, and a
+resumed one gets it again whenever it changes. So there are two loops: the in-request advisor for tactics (no wake,
+no lost context), and the Researcher for strategy: tasks, `lab thread ask` questions and reports.
+
+**Context.** Every agent loads only its project's `CLAUDE.md` (the goal and the operators' rules); the lab's
+and the workstation's CLAUDE.md files are excluded (`claudeMdExcludes`) and Claude Code's auto-memory is off —
+memory is the lab's files and registries. Prompts carry the STATE.md summary (its first section) instead of the
+whole file; agents read the sections they need. A file an agent edits (the Scout's STATE.md and KNOWN_STALE.md,
+the Researcher's RESEARCH.md) is referenced, not pasted: Claude Code makes it Read the file before editing anyway.
+Each role gets only the tools it uses (`toolset`, passed as `--tools`; ~8–10k fewer tokens on every model call). A
+thread's routine check runs on Sonnet only while its session is under 40k tokens: the prompt cache is per model,
+so a light model resuming a big session would re-cache all of it.
 
 ## Operate
 
@@ -32,6 +58,7 @@ systemctl --user status labd          # runs at boot (linger enabled)
 journalctl --user -u labd -f
 lab status | lab world | lab events -n 50 | lab runs | lab budget | lab gpu list | lab gpu stock
 lab thread list | lab thread show t-001 | lab thread note t-001 --text "try X"
+lab idea list [--all] | lab idea show 7 | lab idea ready 7 [--thread t-001]   # the task queue
 lab gpu pause "reason" | lab gpu resume   # humans only: stop all lab GPUs / allow them again
 lab inject "question" --author me     # simulate a Discord request
 lab maint list | lab maint request "change X" | lab maint approve m-3   # lab changes (humans only)
@@ -84,7 +111,8 @@ is deleted (it never held anything) and its machine is blacklisted, so the next 
   reads, env dumps, `git push`, subnet submission/registration, direct Runpod/Shadeform/Vast calls, edits to the
   control plane, and killing labd. The concierge runs read-only (`dontAsk` + allowlist).
   It is a seatbelt, not a vault: agents run as the same Unix user.
-- World changes reach threads through the Scout's brief → the Director, who notes or retires affected threads.
+- World changes reach the Researcher through the Scout's brief (it re-plans and tells affected threads); every
+  thread pass also shows the live facts and the briefs since its previous pass.
 
 ## Changing the lab from Discord (the maintainer)
 Operators (`lab.toml` `[maintainer].operators`, Discord user ids — checked in code) write
@@ -107,8 +135,8 @@ Operators (`lab.toml` `[maintainer].operators`, Discord user ids — checked in 
 
 ## Add a project
 Create `projects/<name>/` with `project.toml` (copy affine's), `plugin.py` (`sources()` +
-`build_world()`), `prompts/`, `GOAL.md`; restart labd.
-`projects/<name>/CLAUDE.md` holds the operators' standing rules for that project ("never train LoRA", …):
+`build_world()`), `prompts/`, `TASK_TEMPLATE.md`; restart labd.
+`projects/<name>/CLAUDE.md` holds the project's goal and the operators' standing rules for that project ("never train LoRA", …):
 every project agent works under that folder, so Claude Code loads it, and edits reach resumed thread sessions on
 their next pass. Agents cannot edit it; `maint:` edits to it wait for an operator's approval.
 

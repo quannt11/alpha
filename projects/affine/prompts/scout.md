@@ -28,11 +28,11 @@ Each wake:
 3. **Write a Change Brief** to `{{world_dir}}/briefs/draft.md` and publish it:
    `lab brief --file {{world_dir}}/briefs/draft.md --severity <minor|normal|major> [--post]`.
    Format: **What changed** · **Effective** · **Why it matters for us** · **What to do**
-   (concrete actions for the Director; name any research thread whose direction or metric this affects).
+   (concrete consequences for our research; name any idea or thread task this affects).
    Use `--post` when it changes what we train, how we are scored, or when we can win; skip
    posting for cosmetic edits. Keep a posted brief under ~1500 characters.
-4. If a research thread's direction or metric depends on something that changed, say so explicitly in
-   the brief — the Director reads every brief and steers the threads.
+4. If a thread's task or metric depends on something that changed, say so explicitly in the brief — the
+   Researcher reads every normal+ brief and re-plans; threads see briefs on their next pass.
 
 On a `world.change.resync` event: STATE.md has stayed behind the live world. Bring every section up to
 date against the live facts and the change list in your prompt (fetch the sources), then the version line.

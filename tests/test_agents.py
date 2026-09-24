@@ -102,7 +102,7 @@ async def test_min_severity_filter(db, cfg, fake):
 
 def add_thread(db, tid="t-001", status="active", session=None, passes=0):
     db.insert("threads", id=tid, project="affine", title="t " + tid, status=status, created_at=now(),
-              passes=passes, session_id=session, workdir="/tmp")
+              passes=passes, session_id=session, workdir="/tmp", task_id=1)
 
 
 async def test_thread_is_keyed_and_defers_while_pending(db, cfg, fake):
@@ -111,7 +111,7 @@ async def test_thread_is_keyed_and_defers_while_pending(db, cfg, fake):
     try:
         a = Agents(db, cfg)
         add_thread(db)
-        db.emit("affine", "thread.start", "go", severity="normal", key="t-001")
+        db.emit("affine", "thread.task", "go", severity="normal", key="t-001")
         a.dispatch()
         a.launch()
         await asyncio.sleep(0.1)
@@ -138,11 +138,11 @@ async def test_retired_thread_is_not_woken(db, cfg, fake):
 async def test_thread_session_is_created_then_resumed(db, cfg, fake):
     a = Agents(db, cfg)
     add_thread(db)
-    db.emit("affine", "thread.start", "go", key="t-001")
+    db.emit("affine", "thread.task", "go", key="t-001")
     await drain(a)
     argv0 = (fake / "calls" / "0.argv").read_text().splitlines()
     sid = argv0[argv0.index("--session-id") + 1]
-    assert "--resume" not in argv0 and argv0[argv0.index("--model") + 1] == "claude-fable-5-1"
+    assert "--resume" not in argv0 and argv0[argv0.index("--model") + 1] == "claude-opus-5-5"
     t = db.one("SELECT * FROM threads")
     assert t["passes"] == 1 and t["session_id"] in (sid, "sess-0")
     db.emit("affine", "thread.continue", "again", key="t-001")
@@ -150,7 +150,7 @@ async def test_thread_session_is_created_then_resumed(db, cfg, fake):
     argv1 = (fake / "calls" / "1.argv").read_text().splitlines()
     assert argv1[argv1.index("--resume") + 1] == t["session_id"]
     assert "resuming your own session" in (fake / "calls" / "1.prompt").read_text()
-    assert "## Your charter" in (fake / "calls" / "0.prompt").read_text()
+    assert "## Your task" in (fake / "calls" / "0.prompt").read_text()
 
 
 async def test_resumed_thread_sees_live_facts_and_new_briefs(db, cfg, fake):
@@ -160,7 +160,7 @@ async def test_resumed_thread_sees_live_facts_and_new_briefs(db, cfg, fake):
     brief.parent.mkdir(parents=True, exist_ok=True)
     brief.write_text("**What changed** forfeit floor -12 -> -6 sd")
     db.emit("affine", "world.brief", "old brief", payload={"path": str(brief)})
-    db.emit("affine", "thread.start", "go", key="t-001")
+    db.emit("affine", "thread.task", "go", key="t-001")
     await drain(a)
     p0 = (fake / "calls" / "0.prompt").read_text()
     assert "## World now" in p0 and "World changes since" not in p0   # a fresh session reads STATE.md instead
@@ -183,7 +183,7 @@ def argv_model(fake, n):
 async def test_routine_checks_resume_the_thread_on_sonnet(db, cfg, fake):
     a = Agents(db, cfg)
     add_thread(db)
-    db.emit("affine", "thread.start", "go", key="t-001")
+    db.emit("affine", "thread.task", "go", key="t-001")
     await drain(a)
     db.emit("affine", "job.check", "r001 running 2h", key="t-001")
     await drain(a)
@@ -193,8 +193,8 @@ async def test_routine_checks_resume_the_thread_on_sonnet(db, cfg, fake):
     db.emit("affine", "job.check", "r001 running 3h", key="t-001")
     db.emit("affine", "job.finished", "r001 exit 0", key="t-001")
     await drain(a)
-    assert argv_model(fake, 2) == "claude-fable-5-1"     # anything real in the batch -> Fable
-    assert [r["model"] for r in runs(db)] == ["claude-fable-5-1", "claude-sonnet-5", "claude-fable-5-1"]
+    assert argv_model(fake, 2) == "claude-opus-5-5"     # anything real in the batch -> Fable
+    assert [r["model"] for r in runs(db)] == ["claude-opus-5-5", "claude-sonnet-5", "claude-opus-5-5"]
     assert (fake / "calls" / "0.env").read_text().split()[-1] == "claude-sonnet-5"   # subagents
 
 
@@ -231,7 +231,7 @@ async def test_slot_pools_threads_concierge_thinkers(db, cfg, fake):
     os.environ["FAKE_SLEEP"] = "0.3"
     try:
         a = Agents(db, cfg)
-        for role in ("director", "scout", "analyst"):
+        for role in ("researcher", "scout", "analyst"):
             db.insert("agent_runs", project="affine", role=role, key="", status="queued", queued_at=now(), event_ids="[]")
         for i in range(4):
             add_thread(db, f"t-00{i}")
@@ -245,7 +245,7 @@ async def test_slot_pools_threads_concierge_thinkers(db, cfg, fake):
         a.launch()
         running = [r["role"] for r in runs(db) if r["status"] == "running"]
         assert running.count("thread") == 3 and running.count("concierge") == 1
-        assert sorted(r for r in running if r not in ("thread", "concierge")) == ["analyst", "scout"]
+        assert sorted(r for r in running if r not in ("thread", "concierge")) == ["researcher", "scout"]
         assert db.one("SELECT status FROM agent_runs WHERE role='lead'")["status"] == "error"
         await asyncio.gather(*a.tasks.values())
     finally:
@@ -262,11 +262,11 @@ async def test_prompts_build_for_every_role(db, cfg, project, fake):
         sysp = a.system_prompt(project, role, project.work_dir / name)
         assert "{{" not in sysp, name
         assert name in text and len(text) > 100
-    assert set(project.roles) == {"concierge", "scout", "thread", "analyst", "director", "maintainer"}
-    assert project.roles["thread"].model == "claude-fable-5-1"
+    assert set(project.roles) == {"concierge", "scout", "researcher", "thread", "analyst", "maintainer"}
+    assert project.roles["thread"].effort == "medium"
     assert {n: r.model for n, r in project.roles.items()} == {
-        "concierge": "claude-sonnet-5", "scout": "claude-sonnet-5", "thread": "claude-fable-5-1",
-        "analyst": "claude-opus-5-5", "director": "claude-opus-5-5", "maintainer": "claude-opus-5-5"}
+        "concierge": "claude-sonnet-5", "scout": "claude-sonnet-5", "researcher": "claude-fable-5-1",
+        "thread": "claude-opus-5-5", "analyst": "claude-opus-5-5", "maintainer": "claude-opus-5-5"}
 
 
 def test_every_project_role_works_under_the_project_claude_md(cfg, project):
@@ -281,7 +281,7 @@ async def test_thread_pass_cost_is_the_delta_of_the_session_total(db, cfg, fake)
     a = Agents(db, cfg)
     add_thread(db)
     (fake / "cost").write_text("7.79")
-    db.emit("affine", "thread.start", "go", key="t-001")
+    db.emit("affine", "thread.task", "go", key="t-001")
     await drain(a)
     (fake / "cost").write_text("7.95")             # claude reports the session's running total
     db.emit("affine", "thread.continue", "again", key="t-001")
@@ -298,7 +298,7 @@ async def test_session_rotates_with_a_handover(db, cfg, fake, tmp_path):
     add_thread(db)
     wd = p.work_dir / "threads" / "t-001"
     (fake / "ctx").write_text("200000")
-    db.emit("affine", "thread.start", "go", key="t-001")
+    db.emit("affine", "thread.task", "go", key="t-001")
     await drain(a)
     t = db.one("SELECT * FROM threads")
     assert t["rotate_pending"] == 1 and t["context_tokens"] == 200010
@@ -307,7 +307,7 @@ async def test_session_rotates_with_a_handover(db, cfg, fake, tmp_path):
     db.emit("affine", "job.check", "r001 running", key="t-001")
     await drain(a)
     argv1 = (fake / "calls" / "1.argv").read_text().splitlines()
-    assert "--resume" in argv1 and argv_model(fake, 1) == "claude-fable-5-1"
+    assert "--resume" in argv1 and argv_model(fake, 1) == "claude-opus-5-5"
     assert "last pass of this session" in (fake / "calls" / "1.prompt").read_text()
     t = db.one("SELECT * FROM threads")
     assert t["session_id"] is None and t["session_passes"] == 0 and t["generation"] == 2 and t["passes"] == 2
