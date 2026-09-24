@@ -29,11 +29,11 @@ FORBIDDEN_PATH = re.compile(r"^projects/[^/]+/(work|world)/")
 # deployed only after an operator approves
 PROTECTED_PATH = re.compile(r"^(bin/lab-guard|bin/lab-deploy|lab/maint\.py|lab/budget\.py|lab\.toml|systemd/)")
 PROTECTED_LINE = re.compile(r"daily_usd|test_mode|test_policy|max_gpus|allowed_gpu_types|per_experiment_usd|"
-                            r"approval_over_usd|operators|RUNPOD_API_KEY|DISCORD_BOT_TOKEN|SECRET_ENV|"
+                            r"approval_over_usd|operators|RUNPOD_API_KEY|SHADEFORM_API_KEY|DISCORD_BOT_TOKEN|SECRET_ENV|"
                             r"secrets_files|load_secrets|\"permissions\"|bypassPermissions")
 SECRET_LIKE = re.compile(r"sk-ant-[\w-]{20,}|ghp_\w{20,}|github_pat_\w{20,}|rpa_\w{20,}|xox[bp]-[\w-]{10,}|"
                          r"-----BEGIN [A-Z ]*PRIVATE KEY|\b[MN][\w-]{23,25}\.[\w-]{6}\.[\w-]{27,}")
-SECRET_ENV = ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "DISCORD_BOT_TOKEN_ARBOS_BITTENSOR", "CLAUDE_CODE_OAUTH_TOKEN",
+SECRET_ENV = ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "SHADEFORM_API_KEY", "DISCORD_BOT_TOKEN_ARBOS_BITTENSOR", "CLAUDE_CODE_OAUTH_TOKEN",
               "ANTHROPIC_API_KEY", "VIRTUAL_ENV")
 DONE = ("deployed", "rolled_back", "no_change", "failed", "rejected")
 

@@ -153,6 +153,28 @@ async def test_thread_session_is_created_then_resumed(db, cfg, fake):
     assert "## Your charter" in (fake / "calls" / "0.prompt").read_text()
 
 
+async def test_resumed_thread_sees_live_facts_and_new_briefs(db, cfg, fake):
+    a = Agents(db, cfg)
+    add_thread(db)
+    brief = cfg.projects["affine"].world_dir / "briefs" / "b1.md"
+    brief.parent.mkdir(parents=True, exist_ok=True)
+    brief.write_text("**What changed** forfeit floor -12 -> -6 sd")
+    db.emit("affine", "world.brief", "old brief", payload={"path": str(brief)})
+    db.emit("affine", "thread.start", "go", key="t-001")
+    await drain(a)
+    p0 = (fake / "calls" / "0.prompt").read_text()
+    assert "## World now" in p0 and "World changes since" not in p0   # a fresh session reads STATE.md instead
+    db.emit("affine", "world.brief", "new rule", severity="major", payload={"path": str(brief)})
+    db.emit("affine", "thread.continue", "again", key="t-001")
+    await drain(a)
+    p1 = (fake / "calls" / "1.prompt").read_text()
+    assert "## World now" in p1 and "World changes since your last pass (1 brief(s)" in p1 and "-6 sd" in p1
+    db.emit("affine", "thread.continue", "again", key="t-001")
+    await drain(a)
+    p2 = (fake / "calls" / "2.prompt").read_text()
+    assert "## World now" in p2 and "World changes since" not in p2
+
+
 def argv_model(fake, n):
     argv = (fake / "calls" / f"{n}.argv").read_text().splitlines()
     return argv[argv.index("--model") + 1]

@@ -94,6 +94,8 @@ def guard(tool, role=None, **inp):
     "cd x && git --no-pager push -f",
     "python scripts/submit.py submit --model x",
     "curl -H 'Authorization: Bearer x' https://rest.runpod.io/v1/pods",
+    "curl -H 'X-API-KEY: x' https://api.shadeform.ai/v1/instances/create",
+    "echo $SHADEFORM_API_KEY",
     "systemctl --user stop labd",
     "sed -i s/600/6000/ ~/Work/lab/projects/affine/project.toml",
     "rm -rf ~",

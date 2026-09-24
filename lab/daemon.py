@@ -22,11 +22,13 @@ import time
 from . import config as config_mod
 from .agents import Agents
 from .budget import next_local
+from .context import live_world_version, state_version
 from .db import DB, now, topic_match
 from .discord import Destination, DiscordError, DiscordREST, Gateway, is_addressed_to_bot, strip_mention
 from .fleet import Fleet
 from .maint import Maint
 from .runpod import Runpod
+from .shadeform import Shadeform
 from .sentinel import Sentinel, load_plugin
 
 log = logging.getLogger("labd")
@@ -58,6 +60,8 @@ class Daemon:
         self.gateway: Gateway | None = None
         self.bot_id: str | None = None
         self.runpod = Runpod(self.secrets["RUNPOD_API_KEY"]) if self.secrets.get("RUNPOD_API_KEY") else None
+        self.shadeform = (Shadeform(self.secrets["SHADEFORM_API_KEY"], gpu_map=cfg.shadeform.get("gpu_map"))
+                          if self.secrets.get("SHADEFORM_API_KEY") else None)
         self.sentinels: dict[str, Sentinel] = {}
         self.fleets: dict[str, Fleet] = {}
         self.agents = Agents(self.db, cfg, on_result=self.on_result)
@@ -68,7 +72,8 @@ class Daemon:
             plugin_path = p.dir / "plugin.py"
             if plugin_path.exists():
                 self.sentinels[p.name] = Sentinel(self.db, p, load_plugin(plugin_path))
-            self.fleets[p.name] = Fleet(self.db, cfg, p, self.runpod, notify=self._notifier(p))
+            self.fleets[p.name] = Fleet(self.db, cfg, p, self.runpod, notify=self._notifier(p),
+                                        shadeform=self.shadeform)
             for d in (p.world_dir, p.work_dir):
                 d.mkdir(parents=True, exist_ok=True)
 
@@ -327,8 +332,29 @@ class Daemon:
                     self.db.kv_set(n, "bootstrapped", t)
                     self.db.emit(n, "world.change.bootstrap", "no STATE.md yet: write the first World State",
                                  severity="normal")
+                self._resync_world(p, t)
             self.db.kv_set("_lab", "heartbeat", t)
             await self._sleep(10)
+
+    RESYNC_AFTER_S, RESYNC_EVERY_S = 600, 1800
+
+    def _resync_world(self, p, t: float) -> None:
+        """STATE.md must follow world.json. If it stays behind (a Scout run left the version line old, failed,
+        or the change was too minor to wake it), wake the Scout again — at most every 30 minutes."""
+        n, live, st = p.name, live_world_version(p), state_version(p)
+        if not live or not (p.world_dir / "STATE.md").exists() or st == live:
+            self.db.kv_set(n, "world_lag_since", 0)
+            return
+        since = float(self.db.kv_get(n, "world_lag_since", 0) or 0) or t
+        self.db.kv_set(n, "world_lag_since", since)
+        if t - since < self.RESYNC_AFTER_S or t - float(self.db.kv_get(n, "world_resync_at", 0) or 0) < self.RESYNC_EVERY_S:
+            return
+        if self.db.one("SELECT 1 FROM agent_runs WHERE project=? AND role='scout' AND status IN ('queued','running')", (n,)):
+            return
+        self.db.kv_set(n, "world_resync_at", t)
+        self.db.emit(n, "world.change.resync", f"STATE.md describes {st or 'no stated version'} but the live world is "
+                     f"{live}: bring World State up to date", severity="normal",
+                     payload={"state_version": st, "live_version": live})
 
     async def discord_boot(self):
         token = self.secrets.get("DISCORD_BOT_TOKEN")
@@ -364,9 +390,10 @@ class Daemon:
             tasks.append(asyncio.create_task(self.gateway.run()))
         for p in self.cfg.projects.values():
             self.db.emit(p.name, "labd.started", f"labd started (discord={'on' if self.discord else 'off'}, "
-                         f"runpod={'on' if self.runpod else 'off'})", severity="info")
-        log.info("labd running: projects=%s discord=%s runpod=%s", list(self.cfg.projects), bool(self.discord),
-                 bool(self.runpod))
+                         f"runpod={'on' if self.runpod else 'off'}, shadeform={'on' if self.shadeform else 'off'})",
+                         severity="info")
+        log.info("labd running: projects=%s discord=%s runpod=%s shadeform=%s", list(self.cfg.projects),
+                 bool(self.discord), bool(self.runpod), bool(self.shadeform))
         await self.stop.wait()
         log.info("labd stopping")
         if self.gateway:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -54,6 +55,63 @@ def world_facts(project) -> str:
     return "\n".join(lines)
 
 
+STATE_VERSION = re.compile(r"World version:\s*`([^`]+)`")
+
+
+def live_world_version(project) -> str | None:
+    wj = project.world_dir / "world.json"
+    try:
+        return json.loads(wj.read_text()).get("world_version") if wj.exists() else None
+    except ValueError:
+        return None
+
+
+def state_version(project) -> str | None:
+    """The version the Scout says STATE.md describes (its `World version: `...`` line)."""
+    st = project.world_dir / "STATE.md"
+    m = STATE_VERSION.search(st.read_text(errors="replace")[:4000]) if st.exists() else None
+    return m.group(1) if m else None
+
+
+def rules_of(version: str | None) -> str | None:
+    """`wvk24-e78-cdc56f848` → `wvk24-cdc56f848`: the contract part, without the (hourly) corpus epoch."""
+    if not version:
+        return None
+    parts = version.split("-")
+    return "-".join(parts[:1] + parts[2:]) if len(parts) >= 3 else version
+
+
+def world_lag(db: DB, project) -> str:
+    """A loud note when STATE.md (Scout prose) is behind world.json (live facts), with what changed since."""
+    live, st = live_world_version(project), state_version(project)
+    if not live or not (project.world_dir / "STATE.md").exists() or st == live:
+        return ""
+    hist = db.kv_get(project.name, "world_versions", []) or []
+    idx = next((i for i, (v, _) in enumerate(hist) if v == st), None)
+    since = hist[idx + 1][1] if idx is not None and idx + 1 < len(hist) else now() - 86400
+    rows = db.all("SELECT * FROM events WHERE project=? AND topic LIKE 'world.change.%' AND topic != "
+                  "'world.change.resync' AND ts>=? ORDER BY id DESC LIMIT 15", (project.name, since - 60))
+    changes = "\n".join(f"- #{r['id']} {iso(r['ts'])} [{r['severity']}] {r['topic']}: {r['summary']}"
+                        for r in reversed(rows)) or "- (no change events recorded; compare with the live facts)"
+    return (f"**⚠ STATE.md is behind the live world.** It describes `{st or 'an unstated version'}`; live is "
+            f"`{live}`. The facts above are live: where STATE.md disagrees, trust them and these changes "
+            f"(the Scout is asked to catch up):\n{changes}")
+
+
+def rules_note(db: DB, project: str, stamp: str | None, verb: str) -> str:
+    """Flag an idea or charter written under a contract that is no longer live (corpus epochs don't count)."""
+    live = db.kv_get(project, "world_version")
+    if not stamp or not live or rules_of(stamp) == rules_of(live):
+        return ""
+    return f" ⚠ {verb} under {stamp.split('-')[0]} rules (`{stamp}`; live `{live}`): re-check against World State"
+
+
+def world_now(db: DB, project) -> str:
+    """Live facts plus the staleness note: what every agent should believe about the world right now."""
+    lag = world_lag(db, project)
+    return world_facts(project) + (f"\n\n{lag}" if lag else "")
+
+
 def leases_table(db: DB, project: str, holder: str | None = None) -> str:
     q = ("SELECT * FROM leases WHERE project=? AND status IN ('requested','provisioning','granted',"
          "'release_requested')")
@@ -85,7 +143,8 @@ def threads_table(db: DB, project: str, include_retired: bool = False) -> str:
                    f"({t['best_desc'] or ''}); {n['n']} results ({n['k'] or 0} kept); {t['passes']} passes; "
                    f"spent ${t['spent_usd'] or 0:.2f}; last pass {ago(t['last_pass_at'])}; session {t['generation'] or 1}"
                    + (f" at {t['context_tokens'] // 1000}k tokens" if t["context_tokens"] else "")
-                   + (" (handover next pass)" if t["rotate_pending"] else ""))
+                   + (" (handover next pass)" if t["rotate_pending"] else "")
+                   + rules_note(db, project, t["world_version"], "chartered"))
     return "\n".join(out)
 
 
@@ -145,7 +204,8 @@ def backlog_table(db: DB, project: str) -> str:
     if not rows:
         return "(empty)"
     return "\n".join(f"- idea {r['id']} [{r['status']}] p{r['priority']} {r['title']} — gain: {r['expected_gain']}; "
-                     f"est ${r['est_cost_usd'] or 0:.0f}; by {r['author']}" for r in rows)
+                     f"est ${r['est_cost_usd'] or 0:.0f}; by {r['author']}"
+                     + rules_note(db, project, r["world_version"], "written") for r in rows)
 
 
 def events_digest(db: DB, project: str, since: float, min_sev: str = "info", limit: int = 80) -> str:
@@ -184,7 +244,7 @@ def status_text(db: DB, cfg, project) -> str:
         + (f"   ** GPUs PAUSED by operator since {iso(paused['at'])} **" if paused else ""),
         f"budget today: spent ${b['spent_today']:.2f}, reserved ${b['reserved']:.2f} of ${b['daily_cap']:.0f} ({pools})",
         f"agents running: {agents}; queued {queued}" + (f"; rate-limit backoff until {iso(backoff)}" if backoff > now() else ""),
-        "", "## World", world_facts(project),
+        "", "## World", world_now(db, project),
         "", "## Research threads", threads_table(db, project.name),
         "", "## GPU leases", leases_table(db, project.name),
         "", "## Open tickets", tickets_table(db, project.name),

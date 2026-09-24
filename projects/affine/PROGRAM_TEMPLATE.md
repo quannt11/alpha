@@ -3,10 +3,14 @@
 ## Goal
 What this thread is trying to achieve, in one or two sentences, and why it matters for winning SN120.
 
+## Rules
+The live world version this charter targets (`world_version` from `lab world`, e.g. `wvk24-e78-…`) and
+the contract knobs the direction depends on. If they change, the Director re-checks this charter.
+
 ## Metric
 The single number to optimise (and whether higher or lower is better), how to compute it, and on
 what data. E.g. "paired margin vs the current king (sd units) on a 1,000-turn seeded slice scored with
-rl120 lab/wvk23; higher is better; noise ≈ ±0.05 sd, so only keep changes that move it by > 0.1".
+the rl120 harness matching the live contract; higher is better; noise ≈ ±0.05 sd, so only keep changes that move it by > 0.1".
 
 ## Baseline
 Where to start: repo, branch/commit, the command that reproduces the current number.

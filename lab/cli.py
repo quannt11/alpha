@@ -19,8 +19,8 @@ from pathlib import Path
 
 from . import config as config_mod
 from .budget import Budget
-from .context import (ago, backlog_table, events_digest, iso, leases_table, read, results_table, status_text,
-                      threads_table, tickets_table, world_facts)
+from .context import (ago, backlog_table, events_digest, iso, leases_table, live_world_version, read,
+                      results_table, status_text, threads_table, tickets_table, world_now)
 from .db import DB, now
 from .fleet import ssh_base
 from .maint import Maint
@@ -60,7 +60,7 @@ def cmd_world(c: Ctx, a):
     if a.json:
         print((c.p.world_dir / "world.json").read_text() if (c.p.world_dir / "world.json").exists() else "{}")
         return
-    print(world_facts(c.p))
+    print(world_now(c.db, c.p))
     print()
     print(read(c.p.world_dir / "STATE.md", 20000))
 
@@ -193,7 +193,7 @@ def cmd_backlog(c: Ctx, a):
     if a.action == "add":
         bid = c.db.insert("backlog", project=c.p.name, created_at=now(), author=ROLE, title=a.title,
                           hypothesis=a.hypothesis, expected_gain=a.gain, est_cost_usd=a.cost, priority=a.priority,
-                          status="proposed")
+                          status="proposed", world_version=live_world_version(c.p))
         c.db.emit(c.p.name, "idea.new", f"idea {bid} proposed by {ROLE}: {a.title}", severity="normal",
                   key=str(bid))
         print(f"idea {bid} added")
@@ -242,7 +242,7 @@ def cmd_thread(c: Ctx, a):
         (wd / "NOTES.md").write_text(f"# {tid} — {a.title}\n\nMy notes across passes (newest last).\n")
         (wd / "results.tsv").write_text("ts\trun\tmetric\tvalue\tkept\tcost_usd\tdescription\n")
         db.insert("threads", id=tid, project=p.name, title=a.title, status="active", created_at=now(),
-                  created_by=ROLE, passes=0, metric=a.metric, workdir=str(wd))
+                  created_by=ROLE, passes=0, metric=a.metric, workdir=str(wd), world_version=live_world_version(p))
         db.emit(p.name, "thread.start", f"{tid} started by {ROLE}: {a.title}", severity="normal", key=tid,
                 payload={"title": a.title, "metric": a.metric})
         print(f"{tid} started (workdir {wd}); its first pass begins now")
@@ -421,7 +421,8 @@ def cmd_gpu_stock(c: Ctx, a):
     if not rows:
         print("no stock data for that shape yet")
         return
-    print(f"stock as of {ago(float(cache.get('at', 0)))} (Runpod; none = cannot be rented right now)")
+    print(f"stock as of {ago(float(cache.get('at', 0)))} (Runpod COMMUNITY/SECURE, Shadeform SHADEFORM; "
+          "none = cannot be rented right now)")
     for _, g, n, cl, v, pr in sorted(rows, key=lambda r: (r[0], r[1], r[2])):
         price = f"${pr:.2f}/gpu/h" if pr else ""
         print(f"  {v:<7} {n}× {g:<28} {cl:<9} {price}")
@@ -476,8 +477,11 @@ def cmd_gpu(c: Ctx, a):
             if l["status"] in ("denied", "failed"):
                 die(f"lease {lid} {l['status']}: {l['reason']}", 3)
             if now() >= deadline:
+                mins = p.fleet.get("shadeform_provision_timeout_minutes", 60)
+                boot = (f" — still booting (a Shadeform VM may take up to {mins} min): don't release or re-request "
+                        "it; end the pass with `NEXT: wait`") if l["status"] == "provisioning" else ""
                 print(f"lease {lid} is {l['status']}{' (' + l['reason'] + ')' if l['reason'] else ''}; "
-                      f"labd will wake you with a gpu.lease event when it changes")
+                      f"labd will wake you with a gpu.lease event when it changes{boot}")
                 return
             time.sleep(10)
     if a.action == "release":
@@ -558,7 +562,8 @@ def cmd_doctor(c: Ctx, a):
     print(f"db               {c.cfg.db_path}")
     print(f"projects         {', '.join(c.cfg.projects)}")
     print(f"discord token    {ok('DISCORD_BOT_TOKEN' in s)}")
-    print(f"runpod key       {ok('RUNPOD_API_KEY' in s)}  (GPU leases are denied without it)")
+    print(f"runpod key       {ok('RUNPOD_API_KEY' in s)}  (GPU leases are denied without a Runpod or Shadeform key)")
+    print(f"shadeform key    {ok('SHADEFORM_API_KEY' in s)}  (optional: SHADEFORM in cloud_order; cheapest offer wins)")
     print(f"claude CLI       {ok(shutil.which(c.cfg.claude_bin) is not None)} {shutil.which(c.cfg.claude_bin) or ''}")
     print(f"ssh key          {ok(_key(c).exists())} {_key(c)}")
     for p in c.cfg.projects.values():
@@ -681,7 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--holder")
     s.set_defaults(fn=cmd_result)
 
-    s = sub.add_parser("gpu", help="GPU leases (held by threads) and Runpod stock")
+    s = sub.add_parser("gpu", help="GPU leases (held by threads) and Runpod/Shadeform stock")
     s.add_argument("action", choices=["lease", "release", "extend", "list", "stock", "pause", "resume"])
     s.add_argument("pattern", nargs="?", help="stock: GPU name pattern (e.g. H100); pause/resume: reason")
     s.add_argument("count_pos", nargs="?", type=int, help="stock: GPUs per pod")

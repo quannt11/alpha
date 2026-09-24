@@ -20,17 +20,19 @@ from pathlib import Path
 
 from .config import LAB_ROOT, SONNET, LabConfig, Project, RoleConfig
 from .context import (activity_digest, backlog_table, events_digest, iso, leases_table, read, results_table,
-                      status_text, threads_table, tickets_table, world_facts)
+                      status_text, threads_table, tickets_table, world_facts, world_now)
 from .db import DB, now, topic_match
 from .maint import Maint
 
 log = logging.getLogger("lab.agents")
 
 SEV = {"info": 0, "minor": 1, "normal": 2, "major": 3}
+DIRECTOR_WAITS_FOR_SCOUT_S = 1200
+STATE_LIMIT = 30000   # STATE.md is ~26k chars; cutting it at 8k hid everything past the scoring section
 KEYED_ROLES = {"concierge", "thread", "maintainer"}
 RATE_RE = re.compile(r"rate.?limit|usage limit|too many requests|\b429\b|overloaded|limit reached|"
                      r"resets? at|quota|out of (extra )?usage", re.I)
-SECRET_ENV = ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "DISCORD_BOT_TOKEN_ARBOS_BITTENSOR")
+SECRET_ENV = ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "SHADEFORM_API_KEY", "DISCORD_BOT_TOKEN_ARBOS_BITTENSOR")
 
 READONLY_TOOLS = [
     "Read", "Grep", "Glob", "WebFetch", "WebSearch",
@@ -158,7 +160,17 @@ class Agents:
         # debounce: wait until the burst has been quiet for debounce_s
         if role.debounce_s and now() - evs[-1]["ts"] < role.debounce_s:
             return
+        # the Director decides on World State: let a pending Scout update land first (bounded, so a stuck
+        # Scout cannot hold up people's requests)
+        if role.name == "director" and now() - evs[0]["ts"] < DIRECTOR_WAITS_FOR_SCOUT_S and self._scout_pending(p):
+            return
         self._queue(p, role, key, evs)
+
+    def _scout_pending(self, p: Project) -> bool:
+        scout = p.roles.get("scout")
+        if not scout or not scout.wake_on:
+            return False
+        return self._pending(p.name, "scout", "") or bool(self._matching(p, scout, self._cursor(p.name, "scout", ""))[1])
 
     def _dispatch_keyed(self, p: Project, role: RoleConfig) -> None:
         """One run per key (message id / experiment id). Keys whose previous run
@@ -288,7 +300,7 @@ class Agents:
                 f"({time.strftime('%Y-%m-%d %H:%M %Z')})."]
         payload_limit = {"scout": 20000, "concierge": 1500, "thread": 4000}.get(role.name, 2500)
         head += ["", "## Why you were woken", fmt_events(evs, payload_limit)]
-        world_state = read(p.world_dir / "STATE.md", 8000)
+        world_state = read(p.world_dir / "STATE.md", STATE_LIMIT)
         if role.name == "concierge":
             ev = evs[-1]
             msg = json.loads(ev["payload"] or "{}")
@@ -306,7 +318,7 @@ class Agents:
                      "", "## Lab status", status_text(db, self.cfg, p),
                      "", "## World State (STATE.md)", world_state]
         elif role.name == "scout":
-            head += ["", "## Current world.json facts", world_facts(p),
+            head += ["", "## Current world.json facts", world_now(db, p),
                      "", "## Current STATE.md", world_state,
                      "", "## Current KNOWN_STALE.md", read(p.world_dir / "KNOWN_STALE.md", 6000),
                      "", "## Research threads (tell the Director if a change affects them)", threads_table(db, name)]
@@ -333,6 +345,7 @@ class Agents:
                      "", "## Open tickets from people", tickets_table(db, name),
                      "", "## Ideas", backlog_table(db, name),
                      "", "## GPU leases", leases_table(db, name),
+                     "", "## World now (live facts from world.json)", world_now(db, p),
                      "", "## World State", world_state,
                      "", "## Events in the last 24h (normal+)", events_digest(db, name, since_day, "normal", 60)]
         elif role.name == "analyst":
@@ -362,6 +375,7 @@ class Agents:
         if t["session_id"] and t["session_passes"]:
             out = [""] + live + ["", "(You are resuming your own session; your earlier passes are above in "
                                  "this conversation. program.md and NOTES.md are in your working directory.)"]
+            out += self._world_news(p, tid, fresh=False)
             if t["rotate_pending"]:
                 out += ["", HANDOVER_ASK.format(k=(t["context_tokens"] or 0) // 1000)]
             return out
@@ -379,8 +393,27 @@ class Agents:
                 "\n\n".join(f"### run {r['id']} ({iso(r['ended_at'])})\n{(r['result'] or '')[:2000]}" for r in reports)
                 or "(none)",
                 "", "## GOAL of the lab", read(p.dir / "GOAL.md", 6000),
-                "", "## World State", read(p.world_dir / "STATE.md", 8000),
-                "", "## Other threads", threads_table(db, name), ""] + live
+                "", "## World State", read(p.world_dir / "STATE.md", STATE_LIMIT)] \
+            + self._world_news(p, tid, fresh=True) + ["", "## Other threads", threads_table(db, name), ""] + live
+
+    def _world_news(self, p: Project, tid: str, fresh: bool) -> list[str]:
+        """The rules move under a long-lived session (a resumed pass never re-reads STATE.md), so every
+        pass gets the live facts, and a resumed one also gets the Scout's briefs since its last pass."""
+        seen = int(self.db.kv_get(p.name, f"brief_seen:{tid}", 0) or 0)
+        briefs = self.db.all("SELECT * FROM events WHERE project=? AND topic='world.brief' AND id>? ORDER BY id",
+                             (p.name, seen))
+        if briefs:
+            self.db.kv_set(p.name, f"brief_seen:{tid}", briefs[-1]["id"])
+        out = ["", "## World now (live facts from world.json)", world_now(self.db, p)]
+        if fresh or not briefs:
+            return out
+        out += ["", f"## World changes since your last pass ({len(briefs)} brief(s); STATE.md in "
+                    f"{p.world_dir} has the full current rules — check whether your direction or metric is affected)"]
+        for b in briefs[-5:]:
+            path = json.loads(b["payload"] or "{}").get("path")
+            out += ["", f"### brief #{b['id']} ({iso(b['ts'])}, {b['severity']})",
+                    read(Path(path), 3000) if path else (b["summary"] or "")]
+        return out
 
     # ------------------------------------------------------------ run
     def _settings(self, role: RoleConfig) -> dict:

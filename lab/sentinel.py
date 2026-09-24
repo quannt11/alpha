@@ -226,6 +226,11 @@ class Sentinel:
             tmp.write_text(json.dumps(world, indent=2, sort_keys=True, default=str))
             tmp.replace(wj)
             self.db.kv_set(self.project.name, "world_version", world.get("world_version"))
+            # when each version went live: lets prompts list what changed since STATE.md's version
+            hist = self.db.kv_get(self.project.name, "world_versions", []) or []
+            if not hist or hist[-1][0] != world.get("world_version"):
+                hist = (hist + [[world.get("world_version"), time.time()]])[-100:]
+                self.db.kv_set(self.project.name, "world_versions", hist)
         return world
 
     async def tick(self) -> None:

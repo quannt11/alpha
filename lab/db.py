@@ -159,7 +159,8 @@ class DB:
         ("agent_runs", "model", "TEXT"),
         ("threads", "session_passes", "INTEGER DEFAULT 0"), ("threads", "session_cost", "REAL DEFAULT 0"),
         ("threads", "context_tokens", "INTEGER"), ("threads", "rotate_pending", "INTEGER DEFAULT 0"),
-        ("threads", "generation", "INTEGER DEFAULT 1"),
+        ("threads", "generation", "INTEGER DEFAULT 1"), ("leases", "provisioning_at", "REAL"),
+        ("backlog", "world_version", "TEXT"), ("threads", "world_version", "TEXT"),
     ]
 
     def _migrate(self) -> None:

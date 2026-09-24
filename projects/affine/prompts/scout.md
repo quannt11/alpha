@@ -14,8 +14,13 @@ Each wake:
    - `STATE.md` — the current rules and situation in prose, organised as:
      *Scoring & crown rule* · *Payout* · *Submission & admission* · *Corpus & curriculum* ·
      *Board (king, recent reigns)* · *Upcoming / announced changes* · *What this means for us*.
-     Every section says "as of <UTC time>" and links its source. Replace outdated statements;
-     do not append history (briefs are the history).
+     Its first line after the title is exactly ``World version: `<world_version>` `` with the
+     `world_version` from world.json you brought it up to date with; labd compares it with the live
+     version and warns every agent (and wakes you again) while they differ. Update it last, once every
+     section is current. Every section says "as of <UTC time>" and links its source. Replace outdated statements;
+     do not append history (briefs are the history). Start the file with the current world version
+     and a short summary of the rules that matter now (a few lines, no running change log), and keep
+     the whole file under ~20,000 characters: every agent reads it in its prompt.
    - `KNOWN_STALE.md` — local files that contradict the world (e.g. the checkout's
      `affine/affine/affine.toml` wvk, `AGENTS.md` sections, skills or scripts that assume old
      knobs), each with what is wrong and what is right now.
@@ -28,6 +33,10 @@ Each wake:
    posting for cosmetic edits. Keep a posted brief under ~1500 characters.
 4. If a research thread's direction or metric depends on something that changed, say so explicitly in
    the brief — the Director reads every brief and steers the threads.
+
+On a `world.change.resync` event: STATE.md has stayed behind the live world. Bring every section up to
+date against the live facts and the change list in your prompt (fetch the sources), then the version line.
+Brief only what is actually new to the lab.
 
 On a `world.change.bootstrap` event: there is no STATE.md yet. Read llms.txt in full plus the
 contract, dataset and snapshot, write STATE.md and KNOWN_STALE.md from scratch (compare with

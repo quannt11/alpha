@@ -11,7 +11,7 @@ Sentinel ──diffs──▶ events ──▶ dispatcher ──▶ Concierge ·
    (affine.io, llms.txt, code/, corpus,          (headless Claude, guarded by bin/lab-guard)
     curriculum, board, verdicts, audits)                  │  lab CLI (no secrets)
                                                           ▼
-Discord gateway ◀──outbox── labd ──leases──▶ Runpod pods {pod_prefix}-NN (labrun + watchdog)
+Discord gateway ◀──outbox── labd ──leases──▶ Runpod pods / Shadeform VMs {pod_prefix}-NN (labrun + watchdog)
 ```
 
 Every agent's subagents run on Sonnet 5 (`CLAUDE_CODE_SUBAGENT_MODEL`).
@@ -38,9 +38,20 @@ lab maint list | lab maint request "change X" | lab maint approve m-3   # lab ch
 lab emit tick.daily_report "now"      # force a daily report
 ```
 
-Secrets (`KEY=VALUE`, first file wins): `~/.config/lab/secrets.env` (put `RUNPOD_API_KEY` here),
-then `~/Work/discord-reporter/.env` (`DISCORD_BOT_TOKEN`). Without a Runpod key every GPU lease
-is denied with a clear reason; everything else works.
+Secrets (`KEY=VALUE`, first file wins): `~/.config/lab/secrets.env` (put `RUNPOD_API_KEY` and, optionally,
+`SHADEFORM_API_KEY` here), then `~/Work/discord-reporter/.env` (`DISCORD_BOT_TOKEN`). Without any GPU key
+every lease is denied with a clear reason; everything else works.
+
+### Shadeform (second GPU source)
+With `SHADEFORM_API_KEY` set and `"SHADEFORM"` in `[fleet] cloud_order`, a lease is rented wherever it is
+cheapest — a Runpod cloud or Shadeform's cheapest in-stock offer (`lab gpu stock` shows SHADEFORM rows).
+Shadeform VMs boot in 5–45 min, so they get `shadeform_provision_timeout_minutes` (60) instead of 25, and
+offers advertising a longer boot are skipped. Leases keep using Runpod GPU ids; `lab/shadeform.py` `GPU_MAP`
+translates them (extend it with `[shadeform] gpu_map` in `lab.toml`). A Shadeform instance is a plain
+Ubuntu+CUDA VM: a startup script links /workspace to the largest disk and lets the PiC key in as root, so
+labrun, `lab push/ssh/launch` and the watchdog work unchanged. It **cannot be stopped**, so wherever the
+lab stops a Runpod pod (release `--stop`, 20 min idle, overtime, budget, pause) it deletes the VM,
+/workspace included. The lab only touches instances in its own `pods` table.
 
 ## Safety model
 - Budget is enforced in code: the daily cap ($600) is the only spending limit. Leases reserve their
@@ -49,9 +60,9 @@ is denied with a clear reason; everything else works.
   concurrency cap (`max_gpus`) exist but are off. Overtime hard stop at a lease's hours +10%; idle pods
   stop after 20 min.
 - `test_mode = true` in project.toml applies `[fleet.test_policy]` (currently 1× H100 per lease).
-- The fleet only touches pods in its own `pods` table — the Runpod account is shared.
+- The fleet only touches pods in its own `pods` table — the Runpod and Shadeform accounts are shared.
 - Agents: `bin/lab-guard` (PreToolUse, exit 2 blocks even under bypassPermissions) stops credential
-  reads, env dumps, `git push`, subnet submission/registration, direct Runpod calls, edits to the
+  reads, env dumps, `git push`, subnet submission/registration, direct Runpod/Shadeform calls, edits to the
   control plane, and killing labd. The concierge runs read-only (`dontAsk` + allowlist).
   It is a seatbelt, not a vault: agents run as the same Unix user.
 - World changes reach threads through the Scout's brief → the Director, who notes or retires affected threads.

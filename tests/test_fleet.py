@@ -333,3 +333,138 @@ def test_parse_status_handles_real_labrun_output():
     assert parse_status(real)["state"] == "failed"
     assert parse_status("Warning: banner\n" + real)["exit_code"] == 1
     assert parse_status("{}") == {} and parse_status("") == {} and parse_status("garbage") == {}
+
+
+# ------------------------------------------------------------ Shadeform as the fallback cloud
+class FakeShadeform:
+    gpu_map = {H100: ("H100", "sxm5")}
+
+    def __init__(self):
+        self.pods: dict[str, Pod] = {}
+        self.calls: list[tuple] = []
+        self.price = 2.5
+        self.boot_status = "RUNNING"
+        # a teammate's instance the lab must never touch
+        self.pods["sfteam"] = Pod("sfteam", "someone", "RUNNING", "H100", 1, 2.5, "5.6.7.8", 22, None, "SHADEFORM", {})
+
+    async def gpu_prices(self):
+        return {H100: {"SHADEFORM": self.price, "max": {"SHADEFORM": 8}}}
+
+    async def stock(self, shapes):
+        return {s: "High" for s in shapes}
+
+    async def create_pod(self, *, name, gpu_type, gpu_count, cloud, image, container_disk_gb, volume_gb, env):
+        self.calls.append(("create", name, cloud))
+        pid = f"sf{len(self.pods)}"
+        self.pods[pid] = Pod(pid, name, self.boot_status, "H100", gpu_count, self.price * gpu_count, "10.0.0.9", 22,
+                             None, "SHADEFORM", {})
+        return self.pods[pid]
+
+    async def get_pod(self, pid):
+        return self.pods.get(pid)
+
+    async def list_pods(self):
+        return list(self.pods.values())
+
+    async def delete(self, pid):
+        self.calls.append(("delete", pid))
+        self.pods[pid].status = "TERMINATED"
+
+
+@pytest.fixture
+def sf(fleet):
+    fleet.sf = FakeShadeform()
+    fleet.cloud_order = ["COMMUNITY", "SECURE", "SHADEFORM"]
+    return fleet.sf
+
+
+async def test_cheapest_offer_wins_and_shadeform_is_deleted_not_stopped(db, fleet, rp, sf):
+    add_thread(db)
+    lid = lease(db)
+    await fleet.process_leases()                  # Runpod $2.00 < Shadeform $2.50
+    assert L(db, lid)["cloud"] == "COMMUNITY" and not sf.calls
+    db.update("leases", "id=?", (lid,), status="release_requested", job_status=json.dumps({"stop_now": True}))
+    await fleet.process_leases()
+    db.x("UPDATE pods SET terminated=1")          # no old Runpod pod to reuse
+
+    sf.price, fleet._prices_at = 1.5, 0           # now Shadeform is cheaper
+    lid = lease(db)
+    await fleet.process_leases()
+    l = L(db, lid)
+    assert l["status"] == "granted" and l["cloud"] == "SHADEFORM" and l["ssh_host"] == "10.0.0.9"
+    assert ("create", "Pi_affine-01", "SHADEFORM") in sf.calls and not [c for c in rp.calls if c[0] == "create"][1:]
+    assert "up to 60 min to boot" in db.one("SELECT summary FROM events WHERE topic='gpu.lease' AND "
+                                         "summary LIKE '%provisioning%' ORDER BY id DESC")["summary"]
+    db.update("leases", "id=?", (lid,), status="release_requested", job_status=json.dumps({"stop_now": True}))
+    await fleet.process_leases()
+    assert ("delete", l["pod_id"]) in sf.calls
+    row = db.one("SELECT * FROM pods WHERE id=?", (l["pod_id"],))
+    assert row["terminated"] == 1 and row["state"] == "TERMINATED"
+    await fleet.reconcile()
+    assert not [c for c in sf.calls if c[0] == "delete" and c[1] == "sfteam"]
+
+
+async def test_slow_shadeform_boot_is_waited_for(db, fleet, rp, sf):
+    fleet.cloud_order = ["SHADEFORM"]
+    sf.boot_status = "CREATED"
+    add_thread(db)
+    lid = lease(db)
+    db.update("leases", "id=?", (lid,), requested_at=now() - 5 * 3600)   # waited hours for capacity first
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "provisioning"
+    db.update("leases", "id=?", (lid,), provisioning_at=now() - 40 * 60)  # 40 min: past Runpod's 25, still ok
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "provisioning" and not [c for c in sf.calls if c[0] == "delete"]
+    db.update("leases", "id=?", (lid,), provisioning_at=now() - 61 * 60)
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "failed" and ("delete", L(db, lid)["pod_id"]) in sf.calls
+    assert "pod deleted" in db.one("SELECT summary FROM events WHERE topic='gpu.lease' ORDER BY id DESC")["summary"]
+
+
+async def test_shadeform_idle_vm_is_deleted_and_never_restarted(db, fleet, rp, sf):
+    fleet.cloud_order = ["SHADEFORM"]
+    add_thread(db)
+    lid = lease(db)
+    await fleet.process_leases()
+    pid = L(db, lid)["pod_id"]
+    db.update("leases", "id=?", (lid,), status="release_requested")
+    await fleet.process_leases()                  # released without --stop: the VM idles, still reusable
+    lid2 = lease(db)
+    await fleet.process_leases()
+    assert L(db, lid2)["pod_id"] == pid and len([c for c in sf.calls if c[0] == "create"]) == 1
+    db.update("leases", "id=?", (lid2,), status="release_requested")
+    await fleet.process_leases()
+    db.x("UPDATE pods SET idle_since=?", (now() - 3600,))
+    await fleet.reconcile()
+    assert ("delete", pid) in sf.calls and db.one("SELECT terminated FROM pods WHERE id=?", (pid,))["terminated"] == 1
+    assert "deleted idle pod" in db.one("SELECT summary FROM events WHERE topic='fleet.stopped'")["summary"]
+
+
+async def test_shadeform_alone_is_enough_and_its_outage_spares_runpod(db, cfg, project, rp, sf, fleet):
+    f = Fleet(db, cfg, project, None, shadeform=sf)
+    f.max_per_lease, f.allowed_types = 0, []
+    add_thread(db)
+    lid = lease(db)
+    await f.process_leases()
+    assert L(db, lid)["status"] == "granted" and L(db, lid)["cloud"] == "SHADEFORM"
+    await fleet.process_leases()
+
+    async def down():
+        raise RuntimeError("shadeform 502")
+    sf.list_pods = down
+    lease(db, hours=1)
+    fleet.cloud_order = ["COMMUNITY"]
+    await fleet.process_leases()
+    db.x("UPDATE pods SET last_billed_at=?", (now() - 1800,))
+    await fleet.reconcile()                       # Runpod pods are still billed; Shadeform pods are not "gone"
+    assert db.one("SELECT COUNT(*) n FROM pods WHERE terminated=1")["n"] == 0
+    assert db.one("SELECT SUM(usd) s FROM ledger")["s"] > 0
+
+
+async def test_shadeform_prices_merge_and_stock(db, fleet, rp, sf):
+    fleet.stock_watch = {"types": [H100], "counts": [1]}
+    await fleet.refresh_stock(force=True)
+    prices = db.kv_get("affine", "gpu_prices")
+    assert prices[H100]["COMMUNITY"] == 2.0 and prices[H100]["SHADEFORM"] == 2.5
+    assert fleet.stock_of(H100, 1, "SHADEFORM") == "High"
+    assert fleet.clouds_for("NVIDIA H200", 1) == ["COMMUNITY", "SECURE"]   # no Shadeform mapping for it here

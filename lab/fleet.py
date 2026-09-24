@@ -11,6 +11,11 @@ heal, with a spend cap and a blacklist of machines that burned us).
 
 Hard rule: the fleet only ever touches pods recorded in its own `pods` table. The Runpod
 account is shared with the whole team; a pod the lab did not create is invisible here.
+
+Shadeform (lab/shadeform.py) is a second source, addressed as the pseudo-cloud "SHADEFORM" in
+cloud_order; the cheapest offer wins, whichever provider it is. Its VMs cannot be stopped:
+where a Runpod pod is stopped (keeping /workspace), a Shadeform VM is deleted. They also boot
+slower and less predictably, so they get their own provisioning timeout.
 """
 from __future__ import annotations
 
@@ -25,6 +30,7 @@ from .budget import Budget, day_start
 from .config import LabConfig, Project, expand
 from .db import DB, now
 from .runpod import Pod, Runpod, RunpodError
+from .shadeform import CLOUD as SHADEFORM, Shadeform
 
 log = logging.getLogger("lab.fleet")
 
@@ -69,11 +75,13 @@ def holder_of(l) -> str:
 
 
 class Fleet:
-    def __init__(self, db: DB, cfg: LabConfig, project: Project, runpod: Runpod | None, notify=None):
+    def __init__(self, db: DB, cfg: LabConfig, project: Project, runpod: Runpod | None, notify=None,
+                 shadeform: Shadeform | None = None):
         self.db = db
         self.cfg = cfg
         self.p = project
         self.rp = runpod
+        self.sf = shadeform
         self.budget = Budget(db, project, cfg.timezone)
         f = project.fleet
         self.max_gpus = int(f.get("max_gpus", 0))                      # 0 = no concurrency cap
@@ -81,6 +89,7 @@ class Fleet:
         self.stall_s = float(f.get("stall_minutes", 30)) * 60
         self.check_s = float(f.get("check_hours", 1)) * 3600
         self.provision_timeout_s = float(f.get("provision_timeout_minutes", 25)) * 60
+        self.sf_provision_timeout_s = float(f.get("shadeform_provision_timeout_minutes", 60)) * 60
         self.capacity_retry_s = float(f.get("capacity_retry_minutes", 10)) * 60
         self.capacity_wait_s = float(f.get("capacity_wait_hours", 6)) * 3600
         self.stock_refresh_s = float(f.get("stock_refresh_minutes", 5)) * 60
@@ -99,20 +108,38 @@ class Fleet:
         self._prices_at = 0.0
 
     # ------------------------------------------------------------ pricing
+    def api(self, cloud: str | None) -> Runpod | Shadeform | None:
+        """The client that rents this cloud, or None if its key is not configured."""
+        return self.sf if cloud == SHADEFORM else self.rp
+
     async def prices(self) -> dict[str, dict]:
-        if self.rp and now() - self._prices_at > 3600:
-            try:
-                self._prices = await self.rp.gpu_prices()
-                self._prices_at = now()
+        """Runpod's price table with Shadeform's merged in as the SHADEFORM cloud."""
+        if (self.rp or self.sf) and now() - self._prices_at > 3600:
+            merged, ok = {k: dict(v) for k, v in self._prices.items()}, False
+            for api in (self.rp, self.sf):
+                if not api:
+                    continue
+                try:
+                    got = await api.gpu_prices()
+                except Exception as e:
+                    log.warning("gpu price refresh failed (%s): %r", type(api).__name__, e)
+                    continue
+                ok = True
+                for t, v in got.items():
+                    row = merged.setdefault(t, {})
+                    row.update({k: x for k, x in v.items() if k != "max"})
+                    row["max"] = {**(row.get("max") or {}), **(v.get("max") or {})}
+            if ok:
+                self._prices, self._prices_at = merged, now()
                 self.db.kv_set(self.p.name, "gpu_prices", self._prices)
-            except Exception as e:
-                log.warning("gpu price refresh failed: %r", e)
         return self._prices
 
     def clouds_for(self, gpu_type: str, count: int) -> list[str]:
-        """Clouds from cloud_order that allow `count` GPUs of this type in one pod (unknown = allowed)."""
+        """Clouds from cloud_order that we hold a key for and that allow `count` GPUs of this type in one
+        pod (unknown = allowed). Shadeform only if it has an equivalent of the Runpod GPU id."""
         mx = (self._prices.get(gpu_type) or {}).get("max") or {}
-        return [c for c in self.cloud_order if not mx.get(c) or count <= mx[c]]
+        return [c for c in self.cloud_order if self.api(c) and (not mx.get(c) or count <= mx[c])
+                and (c != SHADEFORM or gpu_type in self.sf.gpu_map)]
 
     async def estimate(self, gpu_type: str | list[str], count: int, hours: float) -> tuple[float | None, str | None]:
         """Worst case over the candidate GPU types that have a known price, each priced on the first
@@ -153,7 +180,6 @@ class Fleet:
         return None
 
     # ------------------------------------------------------------ stock
-    STOCK_RANK = {"High": 0, "Medium": 1, "Low": 2}
     STOCK_FRESH_S = 900
 
     def _watch_shapes(self) -> set[tuple[str, int]]:
@@ -168,7 +194,7 @@ class Fleet:
         """Every stock_refresh_minutes (or at once when the CLI asked for a shape): record stock for
         every watched shape on every cloud that can host it; wake capacity-waiting leases whose
         shape is now in stock."""
-        if not self.rp:
+        if not (self.rp or self.sf):
             return
         cache = self.db.kv_get(self.p.name, "stock", {}) or {}
         pending = self.db.kv_get(self.p.name, "stock_requests", []) or []
@@ -178,10 +204,13 @@ class Fleet:
         shapes = [(t, c, cl) for t, c in sorted(self._watch_shapes()) for cl in self.clouds_for(t, c)]
         if not shapes:
             return
-        try:
-            got = await self.rp.stock(shapes)
-        except Exception as e:
-            log.warning("stock refresh failed: %r", e)
+        got: dict = {}
+        for api in {self.api(cl) for _, _, cl in shapes}:
+            try:
+                got.update(await api.stock([s for s in shapes if self.api(s[2]) is api]))
+            except Exception as e:
+                log.warning("stock refresh failed (%s): %r", type(api).__name__, e)
+        if not got:
             return
         self.db.kv_set(self.p.name, "stock", {"at": now(), "shapes": {f"{t}|{c}|{cl}": v for (t, c, cl), v in got.items()}})
         self.db.kv_set(self.p.name, "stock_requests", [])
@@ -211,16 +240,31 @@ class Fleet:
         for l in self.db.all("SELECT * FROM leases WHERE project=? AND status IN ('provisioning','granted')",
                              (self.p.name,)):
             await self._release(l, reason="GPUs paused by operator", stop_now=True)
-        if self.rp:
-            for pod in self.db.all("SELECT * FROM pods WHERE project=? AND terminated=0 AND state='RUNNING'",
-                                   (self.p.name,)):
-                try:
-                    await self.rp.stop(pod["id"])
-                    self.db.update("pods", "id=?", (pod["id"],), state="EXITED", lease_id=None)
-                except RunpodError as e:
-                    log.warning("pause: stop %s failed: %r", pod["name"], e)
+        for pod in self.db.all("SELECT * FROM pods WHERE project=? AND terminated=0 AND state='RUNNING'",
+                               (self.p.name,)):
+            try:
+                await self.stop_pod(pod["id"])
+                self.db.update("pods", "id=?", (pod["id"],), lease_id=None)
+            except RunpodError as e:
+                log.warning("pause: stop %s failed: %r", pod["name"], e)
 
     # ------------------------------------------------------------ helpers
+    async def stop_pod(self, pod_id: str) -> str:
+        """Stop a lab pod. Shadeform VMs cannot stop, so they are deleted (and their disk with them).
+        Returns what happened: "stopped" | "deleted"."""
+        row = self.db.one("SELECT cloud FROM pods WHERE id=?", (pod_id,))
+        cloud = row["cloud"] if row else None
+        api = self.api(cloud)
+        if api is None:
+            raise RunpodError(f"no API key for {cloud or 'Runpod'} on the daemon")
+        if cloud == SHADEFORM:
+            await api.delete(pod_id)
+            self.db.update("pods", "id=?", (pod_id,), state="TERMINATED", terminated=1)
+            return "deleted"
+        await api.stop(pod_id)
+        self.db.update("pods", "id=?", (pod_id,), state="EXITED")
+        return "stopped"
+
     def active_gpus(self) -> int:
         """GPUs on pods the lab actually holds (provisioning or granted leases)."""
         r = self.db.one("SELECT COALESCE(SUM(gpu_count),0) n FROM leases WHERE project=? AND status IN "
@@ -279,8 +323,8 @@ class Fleet:
         if float(self.db.kv_get(self.p.name, f"capnext:{l['id']}", 0) or 0) > now():
             return  # waiting for Runpod capacity; retry later
         deny = None
-        if not self.rp:
-            deny = "RUNPOD_API_KEY is not configured on the daemon"
+        if not (self.rp or self.sf):
+            deny = "no GPU provider key (RUNPOD_API_KEY / SHADEFORM_API_KEY) is configured on the daemon"
         else:
             deny = self._holder_ok(h) or self.policy_violation(l)
         est = None
@@ -307,15 +351,17 @@ class Fleet:
         for t in self.candidates(l):
             pod_row = self.db.one(
                 "SELECT * FROM pods WHERE project=? AND terminated=0 AND lease_id IS NULL AND gpu_type=? AND "
-                "gpu_count=? ORDER BY (last_experiment=?) DESC, (state='RUNNING') DESC, last_seen DESC",
+                "gpu_count=? AND (state='RUNNING' OR COALESCE(cloud,'')!='SHADEFORM') "   # a deleted VM can't start
+                "ORDER BY (last_experiment=?) DESC, (state='RUNNING') DESC, last_seen DESC",
                 (self.p.name, t, l["gpu_count"], h))
-            if pod_row:
+            if pod_row and self.api(pod_row["cloud"]):
                 break
+            pod_row = None
         pool = l["pool"] or next(iter(self.p.pools))
         try:
             if pod_row:
                 if pod_row["state"] != "RUNNING":
-                    await self.rp.start(pod_row["id"])
+                    await self.api(pod_row["cloud"]).start(pod_row["id"])
                 pod_id, name, cloud, gtype = pod_row["id"], pod_row["name"], pod_row["cloud"], pod_row["gpu_type"]
                 self.db.update("pods", "id=?", (pod_id,), lease_id=l["id"], idle_since=None, last_pool=pool,
                                last_experiment=h)
@@ -335,16 +381,19 @@ class Fleet:
             return
         self.db.kv_set(self.p.name, f"capnext:{l['id']}", 0)
         self.db.update("leases", "id=?", (l["id"],), status="provisioning", pod_id=pod_id, pod_name=name,
-                       cloud=cloud, gpu_type=gtype, granted_at=None)
-        self._lease_event(l, "provisioning", f"{name} ({l['gpu_count']}× {gtype}, {cloud})", "info")
+                       cloud=cloud, gpu_type=gtype, granted_at=None, provisioning_at=now())
+        note = (f" — a Shadeform VM: may take up to {self.sf_provision_timeout_s / 60:.0f} min to boot (wait, don't "
+                "release); deleted, not stopped, when released or idle") if cloud == SHADEFORM else ""
+        self._lease_event(l, "provisioning", f"{name} ({l['gpu_count']}× {gtype}, {cloud}){note}", "info")
 
     async def _create(self, l, types: list[str]) -> tuple[Pod, str]:
-        """Try each candidate GPU type on each cloud that can host the count, in-stock shapes first.
+        """Try each candidate GPU type on each cloud that can host the count, cheapest first.
         Raises a capacity RunpodError only if every combination is out of stock."""
         env = {"PUBLIC_KEY": Path(str(self.ssh_key) + ".pub").read_text().strip()}
         combos = [(t, cl) for t in types for cl in self.clouds_for(t, l["gpu_count"])]
         known = {c: self.stock_of(c[0], l["gpu_count"], c[1]) for c in combos}
-        combos.sort(key=lambda c: self.STOCK_RANK.get(known[c], 3 if known[c] == "unknown" else 9))
+        # cheapest first, whichever provider; shapes the stock feed shows as sold out go last
+        combos.sort(key=lambda c: (known[c] == "none", (self._prices.get(c[0]) or {}).get(c[1]) or float("inf")))
         # Trust "none" from the stock feed, but still try blind every 30 min in case the feed is wrong.
         blind_key = f"blind:{l['id']}"
         if combos and all(known[c] == "none" for c in combos):
@@ -356,9 +405,9 @@ class Fleet:
         for gtype, cloud in combos:
             tried.append(f"{gtype}/{cloud}")
             try:
-                pod = await self.rp.create_pod(name=self._next_pod_name(), gpu_type=gtype, gpu_count=l["gpu_count"],
-                                               cloud=cloud, image=self.image, container_disk_gb=self.disk_gb,
-                                               volume_gb=self.volume_gb, env=env)
+                pod = await self.api(cloud).create_pod(
+                    name=self._next_pod_name(), gpu_type=gtype, gpu_count=l["gpu_count"], cloud=cloud,
+                    image=self.image, container_disk_gb=self.disk_gb, volume_gb=self.volume_gb, env=env)
                 pod.cloud = pod.cloud or cloud        # v1 responses omit the cloud type
                 return pod, gtype
             except RunpodError as err:
@@ -381,7 +430,7 @@ class Fleet:
                          f"{self.capacity_wait_s / 3600:.0f}h", severity="normal", key=h)
             first = t
         if t - first > self.capacity_wait_s:
-            reason = f"no Runpod capacity for {(t - first) / 3600:.1f}h: {err}"
+            reason = f"no {'Runpod/Shadeform' if self.sf else 'Runpod'} capacity for {(t - first) / 3600:.1f}h: {err}"
             self.db.update("leases", "id=?", (l["id"],), status="failed", reason=reason[:500])
             self._lease_event(l, "failed", reason[:300] + " — try other GPU types/counts", "major")
             return
@@ -389,8 +438,10 @@ class Fleet:
         self.db.kv_set(self.p.name, f"capnext:{l['id']}", t + self.capacity_retry_s)
 
     async def _check_provisioning(self, l) -> None:
-        pod = await self.rp.get_pod(l["pod_id"]) if self.rp else None
-        age = now() - (l["requested_at"] or now())
+        api = self.api(l["cloud"])
+        pod = await api.get_pod(l["pod_id"]) if api else None
+        # timed from the pod's creation, not the request (which may have waited hours for capacity)
+        age = now() - (l["provisioning_at"] or l["requested_at"] or now())
         if pod and pod.status == "RUNNING" and pod.ssh_host and pod.ssh_port:
             rc, out = await ssh_run(self.ssh_key, pod.ssh_host, pod.ssh_port,
                                     "nvidia-smi --query-gpu=name --format=csv,noheader | head -8; df -h /workspace | tail -1",
@@ -406,43 +457,52 @@ class Fleet:
                                                 f"{l['max_hours']}h", "normal",
                                   host=pod.ssh_host, port=pod.ssh_port, price_hr=pod.price_hr, probe=out.strip()[:400])
                 return
-        if age > self.provision_timeout_s:
+        if age > (self.sf_provision_timeout_s if l["cloud"] == SHADEFORM else self.provision_timeout_s):
             reason = f"pod not reachable after {age / 60:.0f} min"
             if pod and pod.machine_id:
                 self.db.kv_set(self.p.name, "machine_blacklist", sorted(self._blacklist() | {pod.machine_id}))
-            if pod and self.rp:
+            self.db.update("pods", "id=?", (l["pod_id"],), lease_id=None, idle_since=now())
+            how = "stopped"
+            if pod:
                 try:
-                    await self.rp.stop(pod.id)
+                    how = await self.stop_pod(pod.id)
                 except RunpodError:
                     pass
-            self.db.update("pods", "id=?", (l["pod_id"],), lease_id=None, idle_since=now())
             self.db.update("leases", "id=?", (l["id"],), status="failed", reason=reason)
-            self._lease_event(l, "failed", reason + " (pod stopped; request a new lease to retry)", "major")
+            self._lease_event(l, "failed", reason + f" (pod {how}; request a new lease to retry)", "major")
 
     async def _release(self, l, *, reason: str, stop_now: bool = False) -> None:
         t = now()
         self.db.update("leases", "id=?", (l["id"],), status="released", released_at=t, reason=reason)
         if l["pod_id"]:
             self.db.update("pods", "id=?", (l["pod_id"],), lease_id=None, idle_since=t)
-            if stop_now and self.rp:
+            if stop_now:
                 try:
-                    await self.rp.stop(l["pod_id"])
-                    self.db.update("pods", "id=?", (l["pod_id"],), state="EXITED")
+                    await self.stop_pod(l["pod_id"])
                 except RunpodError as e:
                     log.warning("stop on release failed: %r", e)
         self._lease_event(l, "released", reason, "info")
 
     # ------------------------------------------------------------ reconcile + billing
     async def reconcile(self) -> None:
-        if not self.rp:
-            return
-        ours = {r["id"]: r for r in self.db.all("SELECT * FROM pods WHERE project=? AND terminated=0", (self.p.name,))}
+        # pods whose provider has no key on this daemon are left alone (never marked gone)
+        ours = {r["id"]: r for r in self.db.all("SELECT * FROM pods WHERE project=? AND terminated=0", (self.p.name,))
+                if self.api(r["cloud"])}
         if ours:
-            live = {p.id: p for p in await self.rp.list_pods() if p.id in ours}
+            live: dict[str, Pod] = {}
+            down = set()           # a provider whose API failed: its pods wait for the next pass
+            for api in {self.api(r["cloud"]) for r in ours.values()}:
+                try:
+                    live.update({p.id: p for p in await api.list_pods() if p.id in ours})
+                except Exception as e:
+                    log.warning("list pods failed (%s): %r", type(api).__name__, e)
+                    down.add(api)
             t = now()
             for pid, row in ours.items():
+                if self.api(row["cloud"]) in down:
+                    continue
                 pod = live.get(pid)
-                if pod is None:
+                if pod is None or pod.status == "TERMINATED":
                     self.db.update("pods", "id=?", (pid,), terminated=1, state="TERMINATED", last_seen=t)
                     if row["lease_id"]:
                         l = self.db.one("SELECT * FROM leases WHERE id=?", (row["lease_id"],))
@@ -469,9 +529,8 @@ class Fleet:
                         self.db.update("pods", "id=?", (pid,), idle_since=t)
                     if t - idle_since > self.idle_stop_s:
                         try:
-                            await self.rp.stop(pid)
-                            self.db.update("pods", "id=?", (pid,), state="EXITED")
-                            self.db.emit(self.p.name, "fleet.stopped", f"stopped idle pod {row['name']} "
+                            how = await self.stop_pod(pid)
+                            self.db.emit(self.p.name, "fleet.stopped", f"{how} idle pod {row['name']} "
                                          f"(idle {(t - idle_since) / 60:.0f} min)", severity="info")
                         except RunpodError as e:
                             log.warning("idle stop failed: %r", e)

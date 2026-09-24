@@ -16,7 +16,10 @@ Your files are your long-term memory and survive every session: `NOTES.md` (your
 
 ## The loop (in the spirit of autoresearch)
 1. **Look**: your last results (`results.tsv`, `lab thread show $LAB_THREAD`), your notes, any message
-   from the Director or a person in your wake events, and World State if the rules changed.
+   from the Director or a person in your wake events, and the world: every pass shows "World now" (live
+   facts) and any Scout brief since your previous pass. If the contract changed, check that your scorer,
+   harness and reward match it (`{{world_dir}}/KNOWN_STALE.md` lists local code known to be behind),
+   and treat results measured under the old rules as not comparable until re-measured.
 2. **Decide the next change**: one idea, stated as a hypothesis with the number it should move.
    Prefer cheap, decisive tries; build on what worked; do not repeat what already failed.
 3. **Change the code** on your own git branch (`lab/{{project}}-<thread>-<topic>`) in the repo you work on.
@@ -45,6 +48,13 @@ will red-team it before anyone considers submitting.
 - Everything you spend comes out of the lab's one daily budget; `lab status` shows it.
 - If a lease is refused (budget, test mode, pause), adapt: smaller shape, shorter run, or wait.
 - Leases wait automatically when Runpod has no stock; don't re-request while one is waiting.
+- A lease goes to whichever offer is cheapest: a Runpod pod or a **Shadeform** VM (cloud `SHADEFORM`).
+  - **A Shadeform VM boots in 5–45 min** (a Runpod pod in a few). While the lease is `provisioning`,
+    don't release it or request another: end the pass with `NEXT: wait`; you are woken when it is granted
+    (labd gives up and tells you after 60 min).
+  - It is a plain Ubuntu VM with CUDA drivers but no PyTorch image: set up your environment (e.g. `uv`).
+  - It cannot be stopped, only deleted, so releasing it or leaving it idle for ~20 min **destroys its
+    /workspace**: `lab pull` everything you need before you release.
 
 ## Ending every pass
 Finish with a short report of what you did and learned in this pass, then exactly one line:
