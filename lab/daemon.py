@@ -180,12 +180,38 @@ class Daemon:
         if self.maint.handle_message(p, author_id=author.get("id"), author=name, text=text, message_id=m["id"],
                                      channel_id=m["channel_id"], context=ref.get("content") if ref else None):
             return
-        payload ={"id": m["id"], "channel_id": m["channel_id"], "author_id": author.get("id"), "author_name": name,
+        payload = {"id": m["id"], "channel_id": m["channel_id"], "author_id": author.get("id"), "author_name": name,
                    "content": text, "reply_to": ref.get("id"), "reply_to_content": ref.get("content") if ref else None,
-                   "attachments": [a.get("url") for a in m.get("attachments", [])]}
+                   "attachments": [a.get("url") for a in m.get("attachments", [])],
+                   "files": await self.save_attachments(p, m["id"], m.get("attachments", [])),
+                   "operator": str(author.get("id")) in self.cfg.maint.operators}
         self.db.emit(p.name, "discord.request", f"{name}: {text[:300]}", severity="normal", key=m["id"],
                      payload=payload)
         await self.discord.typing(m["channel_id"])
+
+    ATTACHMENT_MAX_BYTES = 5_000_000
+
+    async def save_attachments(self, p, msg_id: str, attachments: list[dict]) -> list[dict]:
+        """Save what people attach under work/inbox/, so agents can pass it on verbatim by path (agents
+        can't download it themselves: WebFetch returns a model's summary, not the file)."""
+        out = []
+        inbox = p.work_dir / "inbox"
+        for a in attachments or []:
+            name = re.sub(r"[^A-Za-z0-9._-]+", "_", a.get("filename") or "attachment")[:120]
+            entry = {"filename": a.get("filename"), "size": a.get("size"), "url": a.get("url")}
+            try:
+                if (a.get("size") or 0) > self.ATTACHMENT_MAX_BYTES:
+                    raise DiscordError(f"{a.get('size')} bytes is over the {self.ATTACHMENT_MAX_BYTES} limit")
+                data = await self.discord.download(a["url"], self.ATTACHMENT_MAX_BYTES)
+                inbox.mkdir(parents=True, exist_ok=True)
+                path = inbox / f"{msg_id}-{name}"
+                path.write_bytes(data)
+                entry["path"] = str(path)
+            except Exception as e:
+                log.warning("attachment %s of %s: %r", name, msg_id, e)
+                entry["error"] = str(e)[:200]
+            out.append(entry)
+        return out
 
     # ------------------------------------------------------------ agent results
     async def on_result(self, p, role, key, run, res):

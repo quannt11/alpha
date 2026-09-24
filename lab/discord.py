@@ -167,6 +167,18 @@ class DiscordREST:
         except DiscordError:
             pass
 
+    async def download(self, url: str, max_bytes: int) -> bytes:
+        """An attachment from Discord's CDN (a signed URL: no token is sent). Refuses files over max_bytes."""
+        async with self.client.stream("GET", url, follow_redirects=True) as r:
+            if r.status_code >= 400:
+                raise DiscordError(f"attachment {r.status_code}", r.status_code)
+            out = bytearray()
+            async for chunk_ in r.aiter_bytes():
+                out += chunk_
+                if len(out) > max_bytes:
+                    raise DiscordError(f"attachment larger than {max_bytes} bytes")
+            return bytes(out)
+
     async def aclose(self):
         await self.client.aclose()
 

@@ -194,10 +194,27 @@ def cmd_ticket(c: Ctx, a):
 def cmd_backlog(c: Ctx, a):
     """Ideas are the Researcher's tasks for implementor threads (lifecycle in lab/research.py)."""
     db, p = c.db, c.p
+    if ROLE == "concierge" and a.action in ("reject", "clear") and not os.environ.get("LAB_OPERATOR"):
+        die("only an operator's request can reject or clear ideas; pass it on with `lab idea suggest`")
+    if a.action == "clear":   # an operator's order: drop every idea not yet being implemented
+        rows = db.all("SELECT id FROM backlog WHERE project=? AND status IN ('suggested','proposed','ready')", (p.name,))
+        for r in rows:
+            db.update("backlog", "id=?", (r["id"],), status="rejected",
+                      notes=f"[{iso(now())} {ROLE}] cleared: {a.note or 'operator order'}")
+        db.emit(p.name, "idea.cleared", f"{len(rows)} idea(s) cleared by {ROLE}: {a.note or ''}"[:300])
+        print(f"cleared {len(rows)} idea(s): {', '.join(str(r['id']) for r in rows) or '-'}")
+        return
     if a.action in ("add", "suggest"):
         if not a.title:
             die(f"idea {a.action} needs --title")
         suggest = a.action == "suggest"
+        files = [str(Path(f).expanduser().resolve()) for f in (a.file or [])]
+        for f in files:
+            if not Path(f).is_file():
+                die(f"no such file {f}")
+        if files:   # the files travel by path, untouched; the Researcher reads them in full
+            a.body = ((a.body or "") + "\n\nAttached files (verbatim; read them in full):\n"
+                      + "\n".join(f"- {f}" for f in files)).strip()
         status = "suggested" if suggest else ("ready" if a.ready else "proposed")
         bid = db.insert("backlog", project=p.name, created_at=now(), author=a.author or ROLE, title=a.title,
                         hypothesis=a.hypothesis, expected_gain=a.gain, est_cost_usd=a.cost, priority=a.priority,
@@ -205,7 +222,8 @@ def cmd_backlog(c: Ctx, a):
                         metric=a.metric, for_thread=a.thread, source_message=a.message)
         if suggest:   # a person's idea: the Researcher weighs it
             db.emit(p.name, "research.suggestion", f"idea {bid} suggested by {a.author or ROLE}: {a.title}",
-                    severity="normal", key=str(bid), payload={"idea": bid, "message_id": a.message})
+                    severity="normal", key=str(bid), payload={"idea": bid, "message_id": a.message, "files": files,
+                                                              "text": text_or_file(a.spec or a.body)})
         else:
             db.emit(p.name, "idea.new", f"idea {bid} [{status}] by {ROLE}: {a.title}", key=str(bid))
         print(f"idea {bid} {status}" + (" — labd hands it to a thread" if status == "ready" else ""))
@@ -298,6 +316,8 @@ def cmd_thread(c: Ctx, a):
         if targets != [me]:
             print(f"sent to {', '.join(t for t in targets if t != me) or '(no active threads)'}")
     elif a.action == "retire":
+        if ROLE == "concierge" and not os.environ.get("LAB_OPERATOR"):
+            die("only an operator's request can retire a thread")
         t = db.one("SELECT * FROM threads WHERE id=? AND project=?", (a.id, p.name))
         if not t or t["status"] != "active":
             die(f"no active thread {a.id}")
@@ -681,7 +701,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_ticket)
 
     s = sub.add_parser("idea", aliases=["backlog"], help="research ideas: the Researcher's tasks for threads")
-    s.add_argument("action", choices=["add", "suggest", "list", "show", "edit", "ready", "accept", "reject", "done"])
+    s.add_argument("action", choices=["add", "suggest", "list", "show", "edit", "ready", "accept", "reject", "done", "clear"])
     s.add_argument("id", nargs="?", type=int)
     s.add_argument("--title")
     s.add_argument("--hypothesis")
@@ -696,6 +716,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--thread", help="hand it to this thread (a follow-up keeps its session warm)")
     s.add_argument("--author")
     s.add_argument("--message", help="suggest: the Discord message id it came from")
+    s.add_argument("--file", action="append", help="suggest: a file to pass on verbatim (repeatable)")
     s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_backlog)
 

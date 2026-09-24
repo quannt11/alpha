@@ -1,5 +1,6 @@
 """The Researcher → implementor pipeline: ideas become tasks for threads by plain code."""
 import asyncio
+import json
 
 import pytest
 
@@ -218,3 +219,45 @@ def test_files_an_agent_edits_are_referenced_not_pasted(cfg, db):
     assert "SECTION-BODY" not in scout and "World version: `v1`" in scout and str(p.world_dir / "STATE.md") in scout
     researcher = a.user_prompt(p, p.roles["researcher"], "", ev)
     assert "RESEARCH-BODY" not in researcher and str(research_doc) in researcher
+
+
+def test_operator_orders_and_verbatim_files(labdir, cfg, monkeypatch, tmp_path):
+    notes = tmp_path / "field-notes.md"
+    notes.write_text("# winner's log\nexact bytes ✓\n")
+    run("idea", "add", "--title", "old", "--spec", "x")
+    monkeypatch.setenv("LAB_ROLE", "concierge")
+    monkeypatch.setattr(cli, "ROLE", "concierge")
+    with pytest.raises(SystemExit):
+        run("idea", "clear", "--note", "not an operator")                     # anyone: refused in code
+    monkeypatch.setenv("LAB_OPERATOR", "1")
+    run("idea", "clear", "--note", "operator: start over")
+    run("idea", "suggest", "--title", "winner's log", "--body", "update the state from this, verbatim",
+        "--author", "Op", "--message", "9", "--file", str(notes))
+    db = DB(cfg.db_path)
+    assert db.one("SELECT status FROM backlog WHERE title='old'")["status"] == "rejected"
+    s = db.one("SELECT * FROM backlog WHERE title=\"winner's log\"")
+    assert str(notes) in s["spec"] and "update the state from this, verbatim" in s["spec"]
+    ev = db.one("SELECT * FROM events WHERE topic='research.suggestion'")
+    assert str(notes) in ev["payload"]
+
+
+async def test_attachments_are_saved_and_the_operator_is_flagged(cfg):
+    from tests.test_daemon import make, msg
+    d = make(cfg)
+
+    async def download(url, max_bytes):
+        return b"# notes\nverbatim"
+    d.discord.download = download
+    cfg.maint.operators = ["5"]
+    m = msg("<@77> read this", mid="950")
+    m["attachments"] = [{"url": "https://cdn/x", "filename": "affine notes.md", "size": 16}]
+    await d.on_message(m)
+    p = json.loads(d.db.one("SELECT payload FROM events WHERE topic='discord.request'")["payload"])
+    assert p["operator"] is True and p["files"][0]["path"].endswith("950-affine_notes.md")
+    assert open(p["files"][0]["path"], "rb").read() == b"# notes\nverbatim"
+    a = Agents(d.db, cfg)
+    proj = cfg.project("affine")
+    ev = [d.db.one("SELECT * FROM events WHERE topic='discord.request'")]
+    text = a.user_prompt(proj, proj.roles["concierge"], "950", ev)
+    assert "an operator" in text and p["files"][0]["path"] in text
+    assert a.env(proj, proj.roles["concierge"], 1, "950").get("LAB_OPERATOR") == "1"

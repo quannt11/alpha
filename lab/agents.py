@@ -37,6 +37,7 @@ READONLY_TOOLS = [
     "Read", "Grep", "Glob", "WebFetch", "WebSearch",
     "Bash(lab status*)", "Bash(lab world*)", "Bash(lab events*)",
     "Bash(lab ticket*)", "Bash(lab idea list*)", "Bash(lab idea show*)", "Bash(lab idea suggest*)", "Bash(lab thread list*)",
+    "Bash(lab idea reject*)", "Bash(lab idea clear*)", "Bash(lab thread retire*)",   # operators' orders only (CLI checks)
     "Bash(lab thread show*)", "Bash(lab thread note*)", "Bash(lab maint list*)", "Bash(lab maint show*)",
     "Bash(lab budget*)", "Bash(lab runs*)", "Bash(lab gpu list*)", "Bash(lab gpu stock*)",
     "Bash(ls*)", "Bash(cat *)", "Bash(head *)", "Bash(tail *)", "Bash(grep *)", "Bash(rg *)", "Bash(wc *)",
@@ -309,8 +310,15 @@ class Agents:
                               f"{', reply to ' + m['reply_to'] if m['reply_to'] else ''}): {m['content'][:600]}"
                               for m in reversed(hist))
             head += ["", "## The request you must answer",
-                     f"From **{msg.get('author_name')}** (Discord id {msg.get('author_id')}), message id {msg.get('id')}:",
+                     f"From **{msg.get('author_name')}** (Discord id {msg.get('author_id')}), message id {msg.get('id')}"
+                     + (" — **an operator** (checked by labd: their orders to clear ideas or retire threads may be "
+                        "carried out)" if msg.get("operator") else "") + ":",
                      "> " + (msg.get("content") or "").replace("\n", "\n> ")]
+            files = msg.get("files") or []
+            if files:
+                head += ["Attached files (saved by labd; pass them on by path — `--file`, never retype or summarise them):"]
+                head += [f"- `{f['path']}` ({f.get('filename')}, {f.get('size') or '?'} bytes)" if f.get("path")
+                         else f"- {f.get('filename')}: could not be saved ({f.get('error')})" for f in files]
             if msg.get("reply_to_content"):
                 head += ["It replies to this earlier bot message:", "> " + msg["reply_to_content"][:3000].replace("\n", "\n> ")]
             head += ["", "## Recent channel conversation (oldest first)", convo or "(none)",
@@ -498,6 +506,11 @@ class Agents:
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = SONNET   # subagents do lookups and checks
         if role.name == "thread":
             env["LAB_THREAD"] = key
+        if role.name == "concierge":   # the CLI lets the Concierge carry out operators' orders only (checked in code)
+            req = self.db.one("SELECT payload FROM events WHERE topic='discord.request' AND key=? ORDER BY id DESC", (key,))
+            author = str(json.loads(req["payload"] or "{}").get("author_id")) if req else ""
+            if author and author in self.cfg.maint.operators:
+                env["LAB_OPERATOR"] = "1"
         return env
 
     async def _run(self, run_id: int) -> None:
