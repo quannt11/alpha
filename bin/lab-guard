@@ -19,12 +19,12 @@ MAINTAINER = os.environ.get("LAB_ROLE") == "maintainer"
 
 SECRET_PATH = re.compile(
     r"(\.local/state/lab/|\.config/lab/secrets|discord-reporter/\.env|\.claude/settings(\.local)?\.json|\.claude\.json|"
-    r"\.claude/\.credentials|ralphs/secret\.sh|\.swarm_env|/proc/[^/\s]+/environ|\.ssh/(?!runpod_pic\b)[\w.-]*id_)")
-SECRET_NAME = re.compile(r"(RUNPOD_API_KEY|SHADEFORM_API_KEY|DISCORD_BOT_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)")
+    r"\.claude/\.credentials|ralphs/secret\.sh|\.swarm_env|\.config/vastai/|\.vast_api_key|/proc/[^/\s]+/environ|\.ssh/(?!runpod_pic\b)[\w.-]*id_)")
+SECRET_NAME = re.compile(r"(RUNPOD_API_KEY|SHADEFORM_API_KEY|VAST_API_KEY|DISCORD_BOT_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)")
 ENV_DUMP = re.compile(r"(^|[;&|(]\s*)(printenv|env|export\s+-p|set|declare\s+-x)\s*($|[;&|)>])")
 CONTROL_PLANE = re.compile(
-    re.escape(LAB) + r"/(lab/|bin/|lab\.toml|vendor/|projects/[^/\s]+/(project\.toml|plugin\.py))|"
-    r"~/Work/lab/(lab/|bin/|lab\.toml|vendor/|projects/[^/\s]+/(project\.toml|plugin\.py))")
+    re.escape(LAB) + r"/(lab/|bin/|lab\.toml|vendor/|projects/[^/\s]+/(project\.toml|plugin\.py|CLAUDE\.md))|"
+    r"~/Work/lab/(lab/|bin/|lab\.toml|vendor/|projects/[^/\s]+/(project\.toml|plugin\.py|CLAUDE\.md))")
 # the maintainer changes its own worktree; the live lab is merged into only by bin/lab-deploy
 LIVE_LAB = re.compile(r"(" + re.escape(LAB) + r"|~/Work/lab|\$HOME/Work/lab)(?=[/\s'\"]|$)")
 GIT_WRITES = {"commit", "merge", "reset", "checkout", "switch", "rebase", "revert", "cherry-pick", "stash", "tag",
@@ -34,7 +34,7 @@ WRITE_OP = re.compile(r"(sed\s+-i|\btee\b|>|\bmv\b|\bcp\b|\brm\b|\bchmod\b|\btru
 BASH_RULES = [
     (re.compile(r"submit\.py\b.*\b(submit|upload|ready|register|activate|auth)\b|\bbtcli\b.*\b(register|transfer|stake|set)\b"),
      "submitting to or registering on the live subnet needs a human. Prepare the candidate and ask in Discord."),
-    (re.compile(r"runpodctl|rest\.runpod\.io|api\.runpod\.io|api\.shadeform\.ai|platform\.shadeform\.ai"), "GPUs are rented only through `lab gpu lease` (budget-enforced)."),
+    (re.compile(r"runpodctl|rest\.runpod\.io|api\.runpod\.io|api\.shadeform\.ai|platform\.shadeform\.ai|(console|cloud)\.vast\.ai|\bvastai\b|vast-cli"), "GPUs are rented only through `lab gpu lease` (budget-enforced)."),
     (re.compile(r"\blab\s+gpu\s+(resume|pause)\b|\bLAB_RUN_ID=|\bunset\s+LAB_RUN_ID\b|env\s+-u\s*LAB_RUN_ID"),
      "pausing/resuming GPUs is a human decision."),
     (re.compile(r"\blab\s+maint\s+(request|approve|reject|mark)\b|\blab-deploy\b|\bsystemd-run\b"),
@@ -98,7 +98,7 @@ def main():
             if rx.search(cmd):
                 block(msg)
         if CONTROL_PLANE.search(cmd) and WRITE_OP.search(cmd):
-            block("the lab control plane (lab/, bin/, lab.toml, project.toml, plugin.py) is read-only for agents.")
+            block("the lab control plane (lab/, bin/, lab.toml, project.toml, plugin.py, CLAUDE.md) is read-only for agents.")
         if MAINTAINER and LIVE_LAB.search(cmd) and (WRITE_OP.search(cmd) or GIT_WRITES & set(git_subcommands(cmd))):
             block("the live lab is read-only for you: change and commit in your worktree (your cwd); "
                   "labd deploys it.")

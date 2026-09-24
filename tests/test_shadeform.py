@@ -34,6 +34,7 @@ class API:
         self.creates: list[dict] = []
         self.fail_clouds: dict[str, tuple[int, str]] = {}
         self.instances: dict[str, dict] = {}
+        self.keys = [{"id": "k-other", "name": "someone", "is_default": True, "public_key": "ssh-ed25519 AAAAother x@y"}]
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         assert req.headers["X-API-KEY"] == "k"
@@ -52,6 +53,11 @@ class API:
                                    "cloud_assigned_id": "c-" + iid, "configuration": t["configuration"],
                                    "hourly_price": t["hourly_price"]}
             return httpx.Response(200, json={"id": iid})
+        if path == "/sshkeys":
+            return httpx.Response(200, json={"ssh_keys": self.keys})
+        if path == "/sshkeys/add":
+            self.keys.append({"id": f"k{len(self.keys)}", **body})
+            return httpx.Response(200, json={"id": self.keys[-1]["id"]})
         if path == "/instances":
             return httpx.Response(200, json={"instances": list(self.instances.values())})
         if path.endswith("/info"):
@@ -90,6 +96,13 @@ async def test_create_rents_cheapest_offer_with_bootstrap(sf, api):
     assert body["name"] == "pi-affine-03" and "Pi_affine-03" in body["tags"]
     script = base64.b64decode(body["launch_configuration"]["script_configuration"]["base64_script"]).decode()
     assert PUB in script and "/workspace" in script and "PermitRootLogin" in script
+    # root ssh before anything slow; completion is marked for the fleet's probe
+    assert script.index("lab_keys/root") < script.index("df ") < script.index("apt-get")
+    # Shadeform deletes /root/.ssh/authorized_keys after the script starts: the key must live elsewhere
+    assert "> /root/.ssh/authorized_keys" not in script and "AuthorizedKeysFile" in script
+    assert script.rstrip().endswith("touch /var/lib/lab-bootstrap.done") and "exec >>/var/log/lab-bootstrap.log" in script
+    df = next(ln for ln in script.splitlines() if "df " in ln)
+    assert " -P " not in df          # GNU df rejects -P with --output: /workspace fell back to the root disk
     assert body["os"].startswith("ubuntu") and "cuda" in body["os"]
     assert pod.name == "Pi_affine-03" and pod.status == "CREATED" and pod.cloud == CLOUD and pod.price_hr == 3.31
 
@@ -124,6 +137,16 @@ async def test_instances_normalise_and_delete(sf, api):
     await sf.delete(pod.id)
     assert [p.status for p in await sf.list_pods()] == ["TERMINATED"]
     assert await sf.get_pod("nope") is None
+
+
+async def test_create_uses_the_lab_key_not_the_account_default(sf, api):
+    """The account default belongs to someone else: a VM created with it was unreachable by the lab."""
+    await sf.create_pod(name="p", gpu_type=H100, gpu_count=1, cloud=CLOUD, image="x",
+                        container_disk_gb=80, volume_gb=200, env={"PUBLIC_KEY": PUB})
+    assert api.keys[-1]["public_key"] == PUB and api.creates[-1]["ssh_key_id"] == api.keys[-1]["id"]
+    await sf.create_pod(name="p", gpu_type=H100, gpu_count=1, cloud=CLOUD, image="x",
+                        container_disk_gb=80, volume_gb=200, env={"PUBLIC_KEY": PUB})
+    assert len(api.keys) == 2 and api.creates[-1]["ssh_key_id"] == api.keys[-1]["id"]   # found, not re-added
 
 
 def test_gpu_map_override():

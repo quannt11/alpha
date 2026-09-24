@@ -16,6 +16,10 @@ Shadeform (lab/shadeform.py) is a second source, addressed as the pseudo-cloud "
 cloud_order; the cheapest offer wins, whichever provider it is. Its VMs cannot be stopped:
 where a Runpod pod is stopped (keeping /workspace), a Shadeform VM is deleted. They also boot
 slower and less predictably, so they get their own provisioning timeout.
+
+Vast.ai (lab/vast.py) is a third, "VAST": Docker containers on marketplace hosts. They stop and start
+like Runpod pods; their probe waits for the onstart script, re-attaches the lab key through the API if
+root is refused, and gives up at once on an instance Vast reports dead (its machine is blacklisted).
 """
 from __future__ import annotations
 
@@ -30,23 +34,25 @@ from .budget import Budget, day_start
 from .config import LabConfig, Project, expand
 from .db import DB, now
 from .runpod import Pod, Runpod, RunpodError
-from .shadeform import CLOUD as SHADEFORM, Shadeform
+from .shadeform import CLOUD as SHADEFORM, READY_CHECK as SF_READY, Shadeform
+from .vast import CLOUD as VAST, READY_CHECK as VAST_READY, Vast
 
 log = logging.getLogger("lab.fleet")
 
 ACTIVE_LEASE = ("provisioning", "granted")
 
 
-def ssh_base(key: Path, host: str, port: int) -> list[str]:
+def ssh_base(key: Path, host: str, port: int, user: str = "root") -> list[str]:
     # Pods are disposable and host:port pairs get reused by different pods, so
     # host keys are not pinned (teacher-swarm hit the same key churn).
     return ["ssh", "-i", str(key), "-p", str(port), "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=12",
-            "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", f"root@{host}"]
+            "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", f"{user}@{host}"]
 
 
-async def ssh_run(key: Path, host: str, port: int, cmd: str, timeout: float = 45) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_exec(*ssh_base(key, host, port), cmd,
+async def ssh_run(key: Path, host: str, port: int, cmd: str, timeout: float = 45,
+                  user: str = "root") -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(*ssh_base(key, host, port, user), cmd,
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
@@ -76,12 +82,13 @@ def holder_of(l) -> str:
 
 class Fleet:
     def __init__(self, db: DB, cfg: LabConfig, project: Project, runpod: Runpod | None, notify=None,
-                 shadeform: Shadeform | None = None):
+                 shadeform: Shadeform | None = None, vast: Vast | None = None):
         self.db = db
         self.cfg = cfg
         self.p = project
         self.rp = runpod
         self.sf = shadeform
+        self.vast = vast
         self.budget = Budget(db, project, cfg.timezone)
         f = project.fleet
         self.max_gpus = int(f.get("max_gpus", 0))                      # 0 = no concurrency cap
@@ -90,6 +97,7 @@ class Fleet:
         self.check_s = float(f.get("check_hours", 1)) * 3600
         self.provision_timeout_s = float(f.get("provision_timeout_minutes", 25)) * 60
         self.sf_provision_timeout_s = float(f.get("shadeform_provision_timeout_minutes", 60)) * 60
+        self.vast_provision_timeout_s = float(f.get("vast_provision_timeout_minutes", 40)) * 60   # image pulls
         self.capacity_retry_s = float(f.get("capacity_retry_minutes", 10)) * 60
         self.capacity_wait_s = float(f.get("capacity_wait_hours", 6)) * 3600
         self.stock_refresh_s = float(f.get("stock_refresh_minutes", 5)) * 60
@@ -108,15 +116,22 @@ class Fleet:
         self._prices_at = 0.0
 
     # ------------------------------------------------------------ pricing
-    def api(self, cloud: str | None) -> Runpod | Shadeform | None:
+    def api(self, cloud: str | None) -> Runpod | Shadeform | Vast | None:
         """The client that rents this cloud, or None if its key is not configured."""
-        return self.sf if cloud == SHADEFORM else self.rp
+        return self.sf if cloud == SHADEFORM else self.vast if cloud == VAST else self.rp
+
+    def any_api(self) -> bool:
+        return bool(self.rp or self.sf or self.vast)
+
+    def provision_timeout(self, cloud: str | None) -> float:
+        return (self.sf_provision_timeout_s if cloud == SHADEFORM else
+                self.vast_provision_timeout_s if cloud == VAST else self.provision_timeout_s)
 
     async def prices(self) -> dict[str, dict]:
-        """Runpod's price table with Shadeform's merged in as the SHADEFORM cloud."""
-        if (self.rp or self.sf) and now() - self._prices_at > 3600:
+        """Runpod's price table with Shadeform's and Vast's merged in as the SHADEFORM and VAST clouds."""
+        if self.any_api() and now() - self._prices_at > 3600:
             merged, ok = {k: dict(v) for k, v in self._prices.items()}, False
-            for api in (self.rp, self.sf):
+            for api in (self.rp, self.sf, self.vast):
                 if not api:
                     continue
                 try:
@@ -136,10 +151,10 @@ class Fleet:
 
     def clouds_for(self, gpu_type: str, count: int) -> list[str]:
         """Clouds from cloud_order that we hold a key for and that allow `count` GPUs of this type in one
-        pod (unknown = allowed). Shadeform only if it has an equivalent of the Runpod GPU id."""
+        pod (unknown = allowed). Shadeform and Vast only if they have an equivalent of the Runpod GPU id."""
         mx = (self._prices.get(gpu_type) or {}).get("max") or {}
         return [c for c in self.cloud_order if self.api(c) and (not mx.get(c) or count <= mx[c])
-                and (c != SHADEFORM or gpu_type in self.sf.gpu_map)]
+                and (c not in (SHADEFORM, VAST) or gpu_type in self.api(c).gpu_map)]
 
     async def estimate(self, gpu_type: str | list[str], count: int, hours: float) -> tuple[float | None, str | None]:
         """Worst case over the candidate GPU types that have a known price, each priced on the first
@@ -194,7 +209,7 @@ class Fleet:
         """Every stock_refresh_minutes (or at once when the CLI asked for a shape): record stock for
         every watched shape on every cloud that can host it; wake capacity-waiting leases whose
         shape is now in stock."""
-        if not (self.rp or self.sf):
+        if not self.any_api():
             return
         cache = self.db.kv_get(self.p.name, "stock", {}) or {}
         pending = self.db.kv_get(self.p.name, "stock_requests", []) or []
@@ -323,8 +338,8 @@ class Fleet:
         if float(self.db.kv_get(self.p.name, f"capnext:{l['id']}", 0) or 0) > now():
             return  # waiting for Runpod capacity; retry later
         deny = None
-        if not (self.rp or self.sf):
-            deny = "no GPU provider key (RUNPOD_API_KEY / SHADEFORM_API_KEY) is configured on the daemon"
+        if not self.any_api():
+            deny = "no GPU provider key (RUNPOD_API_KEY / SHADEFORM_API_KEY / VAST_API_KEY) is configured on the daemon"
         else:
             deny = self._holder_ok(h) or self.policy_violation(l)
         est = None
@@ -354,7 +369,8 @@ class Fleet:
                 "gpu_count=? AND (state='RUNNING' OR COALESCE(cloud,'')!='SHADEFORM') "   # a deleted VM can't start
                 "ORDER BY (last_experiment=?) DESC, (state='RUNNING') DESC, last_seen DESC",
                 (self.p.name, t, l["gpu_count"], h))
-            if pod_row and self.api(pod_row["cloud"]):
+            # a machine that failed to come up is not restarted (a stopped Vast instance stays on its host)
+            if pod_row and self.api(pod_row["cloud"]) and pod_row["machine_id"] not in self._blacklist():
                 break
             pod_row = None
         pool = l["pool"] or next(iter(self.p.pools))
@@ -404,10 +420,12 @@ class Fleet:
         tried = []
         for gtype, cloud in combos:
             tried.append(f"{gtype}/{cloud}")
+            # on a marketplace the same bad host keeps offering the cheapest price: skip blacklisted machines
+            extra = {"avoid": self._blacklist()} if cloud == VAST else {}
             try:
                 pod = await self.api(cloud).create_pod(
                     name=self._next_pod_name(), gpu_type=gtype, gpu_count=l["gpu_count"], cloud=cloud,
-                    image=self.image, container_disk_gb=self.disk_gb, volume_gb=self.volume_gb, env=env)
+                    image=self.image, container_disk_gb=self.disk_gb, volume_gb=self.volume_gb, env=env, **extra)
                 pod.cloud = pod.cloud or cloud        # v1 responses omit the cloud type
                 return pod, gtype
             except RunpodError as err:
@@ -430,7 +448,7 @@ class Fleet:
                          f"{self.capacity_wait_s / 3600:.0f}h", severity="normal", key=h)
             first = t
         if t - first > self.capacity_wait_s:
-            reason = f"no {'Runpod/Shadeform' if self.sf else 'Runpod'} capacity for {(t - first) / 3600:.1f}h: {err}"
+            reason = f"no {'/'.join(n for n, a in (('Runpod', self.rp), ('Shadeform', self.sf), ('Vast', self.vast)) if a)} capacity for {(t - first) / 3600:.1f}h: {err}"
             self.db.update("leases", "id=?", (l["id"],), status="failed", reason=reason[:500])
             self._lease_event(l, "failed", reason[:300] + " — try other GPU types/counts", "major")
             return
@@ -442,8 +460,22 @@ class Fleet:
         pod = await api.get_pod(l["pod_id"]) if api else None
         # timed from the pod's creation, not the request (which may have waited hours for capacity)
         age = now() - (l["provisioning_at"] or l["requested_at"] or now())
-        if pod and pod.status == "RUNNING" and pod.ssh_host and pod.ssh_port:
+        vast = l["cloud"] == VAST
+        row = self.db.one("SELECT created_at FROM pods WHERE id=?", (l["pod_id"],))
+        fresh = bool(row) and (row["created_at"] or 0) >= (l["requested_at"] or 0)    # created for this lease
+        if pod is None or pod.status != "RUNNING" or not (pod.ssh_host and pod.ssh_port):
+            why = ("pod not found" if pod is None else f"pod {pod.status}" if pod.status != "RUNNING"
+                   else "no ssh address yet")
+            if vast and pod and (msg := str((pod.raw or {}).get("status_msg") or "").strip()):
+                why += f" ({msg[:200]})"          # Vast says what it is doing: pulling the image, or why it failed
+            if vast and fresh and pod and pod.status == "ERROR":
+                # a new Vast container that exited/went offline never comes up (a restarted one still
+                # reads "exited" until its host schedules it, so it gets the normal timeout)
+                age = float("inf")
+        else:
+            sf = l["cloud"] == SHADEFORM
             rc, out = await ssh_run(self.ssh_key, pod.ssh_host, pod.ssh_port,
+                                    (SF_READY if sf else VAST_READY if vast else "") +
                                     "nvidia-smi --query-gpu=name --format=csv,noheader | head -8; df -h /workspace | tail -1",
                                     timeout=40)
             if rc == 0:
@@ -457,15 +489,41 @@ class Fleet:
                                                 f"{l['max_hours']}h", "normal",
                                   host=pod.ssh_host, port=pod.ssh_port, price_hr=pod.price_hr, probe=out.strip()[:400])
                 return
-        if age > (self.sf_provision_timeout_s if l["cloud"] == SHADEFORM else self.provision_timeout_s):
-            reason = f"pod not reachable after {age / 60:.0f} min"
+            # a failed probe used to be silent: the lease sat in 'provisioning' with no clue why
+            last = (out.strip().splitlines() or [""])[-1][:200]
+            why = f"ssh probe root@{pod.ssh_host}:{pod.ssh_port} rc={rc}: {last or 'no output'}"
+            if sf and rc == 255 and (user := (pod.raw or {}).get("ssh_user")):
+                # root refused: the VM's own user has the lab key too (ssh_key_id), so ask it why
+                urc, uout = await ssh_run(self.ssh_key, pod.ssh_host, pod.ssh_port,
+                                          "sudo -n journalctl -u init-script --no-pager -n 2 -o cat 2>&1 | tail -2",
+                                          timeout=30, user=user)
+                if urc == 0 and uout.strip():
+                    why += f"; startup script: {' | '.join(uout.strip().splitlines())[:300]}"
+            if vast and rc == 255 and "denied" in out.lower():
+                # root refused our key: put it on the instance again through Vast's API (needs no ssh)
+                try:
+                    await api.attach_key(pod.id, Path(str(self.ssh_key) + ".pub").read_text().strip())
+                    why += "; lab key re-attached through the Vast API"
+                except RunpodError as e:
+                    why += f"; re-attaching the lab key failed: {str(e)[:150]}"
+            log.info("lease %s: %s", l["id"], why)
+        self.db.update("leases", "id=?", (l["id"],), reason=why)
+        if age > self.provision_timeout(l["cloud"]):
+            reason = (f"pod failed to start (last check: {why})" if age == float("inf") else
+                      f"pod not reachable after {age / 60:.0f} min (last check: {why})")
             if pod and pod.machine_id:
                 self.db.kv_set(self.p.name, "machine_blacklist", sorted(self._blacklist() | {pod.machine_id}))
             self.db.update("pods", "id=?", (l["pod_id"],), lease_id=None, idle_since=now())
             how = "stopped"
             if pod:
                 try:
-                    how = await self.stop_pod(pod.id)
+                    if vast and fresh:
+                        # it never came up, so it holds nothing; stopped, it would bill disk on a blacklisted host
+                        await api.delete(pod.id)
+                        self.db.update("pods", "id=?", (pod.id,), state="TERMINATED", terminated=1)
+                        how = "deleted"
+                    else:
+                        how = await self.stop_pod(pod.id)
                 except RunpodError:
                     pass
             self.db.update("leases", "id=?", (l["id"],), status="failed", reason=reason)

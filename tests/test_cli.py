@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from pathlib import Path
 
@@ -76,6 +77,8 @@ def test_thread_note_to_itself_does_not_wake_it(labdir, cfg, thread, monkeypatch
 
 
 def test_gpu_lease_by_thread_with_test_policy(labdir, cfg, thread):
+    toml = labdir / "projects" / "affine" / "project.toml"
+    toml.write_text(re.sub(r"(?m)^test_mode = .*$", "test_mode = true", toml.read_text()))
     run("gpu", "lease", "--gpu", H100, "--hours", "3", "--alt", "NVIDIA H100 NVL")
     db = DB(cfg.db_path)
     l = db.one("SELECT * FROM leases")
@@ -87,6 +90,13 @@ def test_gpu_lease_by_thread_with_test_policy(labdir, cfg, thread):
         run("gpu", "lease", "--gpu", "NVIDIA H200")
     run("gpu", "release")
     assert db.one("SELECT status FROM leases")["status"] == "denied"    # a requested lease is cancelled
+
+
+def test_gpu_lease_without_test_mode_takes_any_shape(labdir, cfg, thread):
+    """affine runs for real since m-2 (2026-09-24): only the budget limits a lease."""
+    run("gpu", "lease", "--gpu", "NVIDIA H200", "--count", "4", "--hours", "2")
+    l = DB(cfg.db_path).one("SELECT * FROM leases")
+    assert l["status"] == "requested" and l["gpu_count"] == 4 and l["gpu_type"] == "NVIDIA H200"
 
 
 def test_gpu_lease_needs_a_thread(labdir, cfg, monkeypatch):

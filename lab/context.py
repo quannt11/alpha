@@ -126,7 +126,7 @@ def leases_table(db: DB, project: str, holder: str | None = None) -> str:
         f"- lease {r['id']} {r['holder'] or r['experiment_id']} [{r['status']}] {r['pod_name'] or '-'} "
         f"{r['gpu_count']}×{r['gpu_type']} ${r['price_hr'] or 0:.2f}/h ≤{r['max_hours']}h "
         f"job={r['job_name'] or '-'}:{r['job_state'] or '-'} heartbeat {ago(r['heartbeat_at'])}"
-        + (f" ({r['reason']})" if r["status"] == "requested" and r["reason"] else "")
+        + (f" ({r['reason']})" if r["status"] in ("requested", "provisioning") and r["reason"] else "")
         for r in rows)
 
 

@@ -421,7 +421,7 @@ def cmd_gpu_stock(c: Ctx, a):
     if not rows:
         print("no stock data for that shape yet")
         return
-    print(f"stock as of {ago(float(cache.get('at', 0)))} (Runpod COMMUNITY/SECURE, Shadeform SHADEFORM; "
+    print(f"stock as of {ago(float(cache.get('at', 0)))} (Runpod COMMUNITY/SECURE, Shadeform SHADEFORM, Vast VAST; "
           "none = cannot be rented right now)")
     for _, g, n, cl, v, pr in sorted(rows, key=lambda r: (r[0], r[1], r[2])):
         price = f"${pr:.2f}/gpu/h" if pr else ""
@@ -477,8 +477,12 @@ def cmd_gpu(c: Ctx, a):
             if l["status"] in ("denied", "failed"):
                 die(f"lease {lid} {l['status']}: {l['reason']}", 3)
             if now() >= deadline:
-                mins = p.fleet.get("shadeform_provision_timeout_minutes", 60)
-                boot = (f" — still booting (a Shadeform VM may take up to {mins} min): don't release or re-request "
+                what, mins = (("a Shadeform VM", p.fleet.get("shadeform_provision_timeout_minutes", 60))
+                              if l["cloud"] == "SHADEFORM" else
+                              ("a Vast instance", p.fleet.get("vast_provision_timeout_minutes", 40))
+                              if l["cloud"] == "VAST" else
+                              ("a Runpod pod", p.fleet.get("provision_timeout_minutes", 25)))
+                boot = (f" — still booting ({what} may take up to {mins} min): don't release or re-request "
                         "it; end the pass with `NEXT: wait`") if l["status"] == "provisioning" else ""
                 print(f"lease {lid} is {l['status']}{' (' + l['reason'] + ')' if l['reason'] else ''}; "
                       f"labd will wake you with a gpu.lease event when it changes{boot}")
@@ -562,8 +566,9 @@ def cmd_doctor(c: Ctx, a):
     print(f"db               {c.cfg.db_path}")
     print(f"projects         {', '.join(c.cfg.projects)}")
     print(f"discord token    {ok('DISCORD_BOT_TOKEN' in s)}")
-    print(f"runpod key       {ok('RUNPOD_API_KEY' in s)}  (GPU leases are denied without a Runpod or Shadeform key)")
+    print(f"runpod key       {ok('RUNPOD_API_KEY' in s)}  (GPU leases are denied without a Runpod, Shadeform or Vast key)")
     print(f"shadeform key    {ok('SHADEFORM_API_KEY' in s)}  (optional: SHADEFORM in cloud_order; cheapest offer wins)")
+    print(f"vast key         {ok('VAST_API_KEY' in s)}  (optional: VAST in cloud_order; cheapest offer wins)")
     print(f"claude CLI       {ok(shutil.which(c.cfg.claude_bin) is not None)} {shutil.which(c.cfg.claude_bin) or ''}")
     print(f"ssh key          {ok(_key(c).exists())} {_key(c)}")
     for p in c.cfg.projects.values():
@@ -577,6 +582,11 @@ def cmd_ralph(c: Ctx, a):
     script = c.cfg.root / "vendor" / "ralph.sh"
     env = {**os.environ, "RALPH_AGENT": os.environ.get("RALPH_AGENT", "claude")}
     os.execvpe("bash", ["bash", str(script), *a.args], env)
+
+
+def cmd_web(c: Ctx, a):
+    from .web import main as web_main
+    web_main([*(["--config", a.config] if a.config else []), *a.args])
 
 
 def cmd_daemon(c: Ctx, a):
@@ -686,7 +696,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--holder")
     s.set_defaults(fn=cmd_result)
 
-    s = sub.add_parser("gpu", help="GPU leases (held by threads) and Runpod/Shadeform stock")
+    s = sub.add_parser("gpu", help="GPU leases (held by threads) and Runpod/Shadeform/Vast stock")
     s.add_argument("action", choices=["lease", "release", "extend", "list", "stock", "pause", "resume"])
     s.add_argument("pattern", nargs="?", help="stock: GPU name pattern (e.g. H100); pause/resume: reason")
     s.add_argument("count_pos", nargs="?", type=int, help="stock: GPUs per pod")
@@ -725,6 +735,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("ralph", help="run the vendored ralph.sh loop (claude backend)")
     s.add_argument("args", nargs=argparse.REMAINDER)
     s.set_defaults(fn=cmd_ralph)
+    s = sub.add_parser("web", help="local dashboard (http://127.0.0.1:8765; --port, --host, --allow-host)")
+    s.add_argument("args", nargs=argparse.REMAINDER)
+    s.set_defaults(fn=cmd_web)
     sub.add_parser("daemon", help="run labd in the foreground").set_defaults(fn=cmd_daemon)
     return ap
 

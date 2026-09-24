@@ -96,8 +96,13 @@ def guard(tool, role=None, **inp):
     "curl -H 'Authorization: Bearer x' https://rest.runpod.io/v1/pods",
     "curl -H 'X-API-KEY: x' https://api.shadeform.ai/v1/instances/create",
     "echo $SHADEFORM_API_KEY",
+    "vastai create instance 51178484 --image x",
+    "curl -H 'Authorization: Bearer x' https://console.vast.ai/api/v0/instances/",
+    "echo $VAST_API_KEY",
+    "cat ~/.config/vastai/vast_api_key",
     "systemctl --user stop labd",
     "sed -i s/600/6000/ ~/Work/lab/projects/affine/project.toml",
+    "echo '- LoRA is fine' >> ~/Work/lab/projects/affine/CLAUDE.md",
     "rm -rf ~",
     "lab gpu resume",
     "python3 -c \"import sqlite3; sqlite3.connect('/home/zenai/.local/state/lab/lab.db')\"",
@@ -133,6 +138,7 @@ def test_guard_allows(cmd):
 def test_guard_file_tools():
     assert guard("Read", file_path="/home/zenai/.claude/settings.json")[0] == 2
     assert guard("Edit", file_path="/home/zenai/Work/lab/lab/fleet.py")[0] == 2
+    assert guard("Edit", file_path="/home/zenai/Work/lab/projects/affine/CLAUDE.md")[0] == 2
     assert guard("Write", file_path="/home/zenai/Work/lab/projects/affine/world/STATE.md")[0] == 0
     assert guard("Read", file_path="/home/zenai/Work/affine/affine/AGENTS.md")[0] == 0
 

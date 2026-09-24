@@ -15,6 +15,18 @@ bin = "claude"
 ssh_key = "~/.ssh/runpod_pic"      # PiC key; the .pub goes into every pod's PUBLIC_KEY
 image = "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
 
+[vast]
+# Which Vast.ai hosts leases may rent from (VAST_API_KEY in secrets.env, "VAST" in a project's cloud_order).
+# Marketplace hosts vary a lot: verified hosts only, plus these floors. Machines that failed to come up are
+# blacklisted by the fleet and skipped.
+min_reliability = 0.97
+min_inet_down_mbps = 200       # model downloads
+max_inet_usd_per_tb = 20       # some hosts charge a lot for bandwidth, which the budget does not see
+min_cuda = 12.8                # the pytorch image is CUDA 12.8
+min_offer_hours = 24           # the host's listing must stay up at least this long
+datacenter_only = false
+# image = "..."                # default: the fleet's image (the same as Runpod's)
+
 [maintainer]
 # Discord user ids allowed to change the lab itself by writing "@bot maint: <what to change>".
 operators = []                       # Discord user ids of your operators

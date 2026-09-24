@@ -5,7 +5,7 @@ import stat
 
 import pytest
 
-from lab.agents import Agents
+from lab.agents import Agents, role_workdir
 from lab.db import now
 
 FAKE = """#!/usr/bin/env bash
@@ -267,6 +267,14 @@ async def test_prompts_build_for_every_role(db, cfg, project, fake):
     assert {n: r.model for n, r in project.roles.items()} == {
         "concierge": "claude-sonnet-5", "scout": "claude-sonnet-5", "thread": "claude-fable-5-1",
         "analyst": "claude-opus-5-5", "director": "claude-opus-5-5", "maintainer": "claude-opus-5-5"}
+
+
+def test_every_project_role_works_under_the_project_claude_md(cfg, project):
+    """projects/<name>/CLAUDE.md holds the operators' rules; Claude Code loads it only from the cwd's ancestors."""
+    assert (project.dir / "CLAUDE.md").exists()
+    for name in project.roles:
+        wd = role_workdir(project, name, "t-001", cfg)
+        assert wd.is_relative_to(project.dir) == (name != "maintainer"), name
 
 
 async def test_thread_pass_cost_is_the_delta_of_the_session_total(db, cfg, fake):

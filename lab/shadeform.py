@@ -6,6 +6,8 @@ same Runpod GPU ids, and it answers with the same `Pod` shape. Two differences t
 - an instance cannot be stopped, only deleted (billing ends and its disk goes with it);
 - instances are plain Ubuntu VMs, so a startup script makes them look like a Runpod pod: a large
   /workspace and root ssh with the lab key, which is how labrun, `lab push` and the watchdog work.
+  The lab key is also the VM's Shadeform ssh key: left unset, Shadeform installs the shared account's
+  default key (someone else's), and a stuck startup script then locks the lab out of its own VM.
 """
 from __future__ import annotations
 
@@ -46,22 +48,36 @@ CAPACITY = CAPACITY_HINTS + ("not available", "out of stock", "sold out", "no av
 STATUS = {"active": "RUNNING", "creating": "CREATED", "pending_provider": "CREATED", "pending": "CREATED",
           "error": "ERROR", "deleting": "TERMINATED", "deleted": "TERMINATED"}
 
-# Runs as root once the VM is active. Root ssh is enabled last, so a successful probe means it all ran.
+# Runs as root once the VM is active. Root ssh goes in first, so a slow step (apt on a fresh VM) can't lock
+# the lab out; the fleet grants the lease only once DONE exists, and shows the log's last line until then.
+# The key lives outside ~/.ssh: Shadeform's provisioning deletes /root/.ssh/authorized_keys (and ubuntu's)
+# seconds *after* starting this script, which is what locked the lab out of leases 10-12. It leaves
+# sshd_config.d alone, so an extra AuthorizedKeysFile there survives.
+LOG, DONE = "/var/log/lab-bootstrap.log", "/var/lib/lab-bootstrap.done"
 BOOTSTRAP = """#!/bin/bash
 # lab bootstrap: make this VM look like a Runpod pod (big /workspace, root ssh with the lab key)
-best=$(df -P --output=avail,target -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null | tail -n +2 \\
+exec >>{log} 2>&1
+set -x
+mkdir -p /etc/ssh/lab_keys /etc/ssh/sshd_config.d
+echo {key} > /etc/ssh/lab_keys/root
+chown -R root:root /etc/ssh/lab_keys && chmod 755 /etc/ssh/lab_keys && chmod 644 /etc/ssh/lab_keys/root
+printf '%s\\n' 'PermitRootLogin prohibit-password' \\
+  'AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2 /etc/ssh/lab_keys/%u' > /etc/ssh/sshd_config.d/00-lab.conf
+systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+best=$(df --output=avail,target -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null | tail -n +2 \\
        | sort -n | tail -1 | awk '{print $2}')
 if [ -n "$best" ] && [ "$best" != "/" ] && [ ! -e /workspace ]; then
   mkdir -p "$best/workspace" && ln -sfn "$best/workspace" /workspace
 fi
 mkdir -p /workspace
-command -v rsync >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync; }
-mkdir -p /root/.ssh /etc/ssh/sshd_config.d
-echo {key} > /root/.ssh/authorized_keys
-chown -R root:root /root/.ssh && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys
-echo 'PermitRootLogin prohibit-password' > /etc/ssh/sshd_config.d/00-lab.conf
-systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-"""
+# bounded: a fresh VM's unattended-upgrades can hold the apt lock
+command -v rsync >/dev/null || { timeout 300 apt-get -o DPkg::Lock::Timeout=120 update -qq
+  DEBIAN_FRONTEND=noninteractive timeout 300 apt-get -o DPkg::Lock::Timeout=120 install -y -qq rsync; }
+touch {done}
+""".replace("{log}", LOG).replace("{done}", DONE)
+
+# Prefixed to the fleet's readiness probe on Shadeform VMs.
+READY_CHECK = (f"test -e {DONE} || {{ echo \"bootstrap still running: $(tail -n1 {LOG} 2>/dev/null)\"; exit 3; }}; ")
 
 
 class ShadeformError(RunpodError):
@@ -150,6 +166,15 @@ class Shadeform:
         return out
 
     # ------------------------------------------------------------ instances
+    async def ssh_key_id(self, public_key: str) -> str:
+        """The account's id for the lab key, registering it if absent (matched on the key, not the name)."""
+        blob = public_key.split()[1]
+        for k in (await self._req("GET", "/sshkeys") or {}).get("ssh_keys", []):
+            if blob in (k.get("public_key") or "").split():
+                return k["id"]
+        log.info("shadeform: registering the lab ssh key as lab_PiC")
+        return (await self._req("POST", "/sshkeys/add", {"name": "lab_PiC", "public_key": public_key}))["id"]
+
     async def list_pods(self) -> list[Pod]:
         d = await self._req("GET", "/instances")
         return [normalise(i) for i in (d or {}).get("instances", [])]
@@ -171,11 +196,12 @@ class Shadeform:
         offers = await self.offers(gpu_type, gpu_count)
         if not offers:
             raise ShadeformError(f"no Shadeform stock for {gpu_count}× {gpu_type}", 503, capacity=True)
+        key_id = await self.ssh_key_id(env["PUBLIC_KEY"])
         script = base64.b64encode(BOOTSTRAP.replace("{key}", shlex.quote(env["PUBLIC_KEY"])).encode()).decode()
         errors: list[ShadeformError] = []
         for t, region in offers:
             body = {"cloud": t["cloud"], "region": region, "shade_instance_type": t["shade_instance_type"],
-                    "shade_cloud": True, "name": name.replace("_", "-").lower(),
+                    "shade_cloud": True, "name": name.replace("_", "-").lower(), "ssh_key_id": key_id,
                     "launch_configuration": {"type": "script", "script_configuration": {"base64_script": script}},
                     "tags": ["lab", name]}
             os_ = next((o for o in (t.get("configuration") or {}).get("os_options") or [] if "cuda" in o), None)

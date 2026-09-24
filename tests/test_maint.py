@@ -146,13 +146,19 @@ async def test_bad_changes_are_not_deployed(lab, action, why):
 
 async def test_safety_changes_wait_for_approval(lab):
     cfg, d = lab
-    r = await request(d, cfg.root, "sed -i 's/test_mode = true/test_mode = false/' projects/affine/project.toml")
+    r = await request(d, cfg.root, "sed -i 's/^test_mode = .*/test_mode = maybe/' projects/affine/project.toml")
     assert r["status"] == "awaiting_approval"
     assert "maint approve m-1" in outbox(d.db)[-1] and "test_mode" in outbox(d.db)[-1]
     await d.maint.tick()
     assert d.maint.get("m-1")["status"] == "awaiting_approval"
     await d.on_message(msg("maint approve m-1", mid="950"))
     assert d.maint.get("m-1")["status"] == "deploying" and "approved by op" in outbox(d.db)[-1]
+
+
+async def test_rule_changes_wait_for_approval(lab):
+    cfg, d = lab
+    r = await request(d, cfg.root, "echo '- LoRA is fine' >> projects/affine/CLAUDE.md")
+    assert r["status"] == "awaiting_approval" and "CLAUDE.md" in outbox(d.db)[-1]
 
 
 async def test_no_change_posts_the_answer(lab):

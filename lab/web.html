@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab Console</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f0efec; --border: #e2e1dc;
+  --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #7a7973;
+  --accent: #2a78d6; --series-1: #2a78d6; --series-2: #eb6834;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --good-bg: #e7f6e7; --warning-bg: #fdf3dc; --critical-bg: #fbe7e7; --info-bg: #e6f0fb;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #242422; --border: #33332f;
+    --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #8f8e86;
+    --accent: #3987e5; --series-1: #3987e5; --series-2: #d95926;
+    --good-bg: #13301a; --warning-bg: #3a2e10; --critical-bg: #3b1616; --info-bg: #14263d;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #242422; --border: #33332f;
+  --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #8f8e86;
+  --accent: #3987e5; --series-1: #3987e5; --series-2: #d95926;
+  --good-bg: #13301a; --warning-bg: #3a2e10; --critical-bg: #3b1616; --info-bg: #14263d;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+header { position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--border); }
+.bar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; flex-wrap: wrap; max-width: 1400px; margin: 0 auto; }
+.brand { font-weight: 700; font-size: 16px; }
+.spacer { flex: 1; }
+nav { display: flex; gap: 2px; padding: 0 12px; overflow-x: auto; max-width: 1400px; margin: 0 auto; }
+nav a { padding: 8px 12px; color: var(--ink-2); border-bottom: 2px solid transparent; white-space: nowrap; }
+nav a.on { color: var(--ink); border-color: var(--accent); font-weight: 600; }
+nav a:hover { text-decoration: none; color: var(--ink); }
+.badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--critical); color: #fff; font-size: 11px; text-align: center; margin-left: 4px; }
+main { max-width: 1400px; margin: 0 auto; padding: 16px; }
+.grid { display: grid; gap: 16px; }
+.cols-2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.kpis { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.card h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.card h2 .sub { font-weight: 400; color: var(--ink-3); font-size: 12px; }
+h1 { font-size: 18px; margin: 0 0 12px; }
+.kpi .label { color: var(--ink-2); font-size: 12px; }
+.kpi .value { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; margin: 2px 0; }
+.kpi .note { color: var(--ink-3); font-size: 12px; }
+.muted { color: var(--ink-3); } .small { font-size: 12px; } .mono { font-family: var(--mono); font-size: 12px; }
+.num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { font-weight: 600; color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+tr.click { cursor: pointer; } tr.click:hover td { background: var(--surface-2); }
+.scroll { overflow-x: auto; }
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--surface-2); color: var(--ink-2); white-space: nowrap; }
+.pill.good { background: var(--good-bg); color: var(--ink); } .pill.good::before { content: "●"; color: var(--good); }
+.pill.warning { background: var(--warning-bg); color: var(--ink); } .pill.warning::before { content: "▲"; color: var(--warning); }
+.pill.critical { background: var(--critical-bg); color: var(--ink); } .pill.critical::before { content: "■"; color: var(--critical); }
+.pill.info { background: var(--info-bg); color: var(--ink); } .pill.info::before { content: "●"; color: var(--accent); }
+.alert { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 8px; margin-bottom: 6px; }
+.alert .ico { font-weight: 700; width: 16px; text-align: center; }
+.alert.critical { background: var(--critical-bg); } .alert.critical .ico { color: var(--critical); }
+.alert.warning { background: var(--warning-bg); } .alert.warning .ico { color: var(--warning); }
+.alert.info { background: var(--info-bg); } .alert.info .ico { color: var(--accent); }
+.alert.good { background: var(--good-bg); } .alert.good .ico { color: var(--good); }
+.alert .lvl { font-size: 11px; text-transform: uppercase; font-weight: 700; color: var(--ink-2); margin-right: 6px; }
+button, select, input, textarea { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+button { cursor: pointer; background: var(--surface-2); }
+button:hover { border-color: var(--ink-3); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { background: var(--critical); border-color: var(--critical); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+textarea { width: 100%; min-height: 70px; resize: vertical; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.stack > * + * { margin-top: 8px; }
+.list-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.list-item:last-child { border-bottom: 0; }
+.clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+pre { white-space: pre-wrap; word-break: break-word; background: var(--surface-2); padding: 10px; border-radius: 6px; font: 12px/1.45 var(--mono); max-height: 520px; overflow: auto; margin: 0; }
+details > summary { cursor: pointer; color: var(--ink-2); }
+.md { overflow-wrap: anywhere; } .md h1, .md h2, .md h3, .md h4 { margin: 14px 0 6px; font-size: 15px; } .md h1 { font-size: 17px; }
+.md p { margin: 6px 0; } .md ul, .md ol { margin: 4px 0; padding-left: 22px; } .md code { font: 12px var(--mono); background: var(--surface-2); padding: 0 3px; border-radius: 3px; }
+.md table { margin: 8px 0; font-size: 12px; } .md blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--border); color: var(--ink-2); }
+.md pre code { background: none; padding: 0; }
+.md-box { max-height: 640px; overflow: auto; }
+.meter { position: relative; height: 14px; background: var(--surface-2); border-radius: 7px; overflow: hidden; margin: 6px 0 4px; }
+.meter .spent { position: absolute; top: 0; bottom: 0; left: 0; background: var(--series-1); border-radius: 7px 0 0 7px; }
+.meter .res { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(45deg, var(--series-1) 0 2px, transparent 2px 6px); opacity: .7; }
+.meter .tick { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--ink-3); }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-2); flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { fill: var(--ink-3); font-size: 11px; }
+.chart .grid-line { stroke: var(--border); stroke-width: 1; }
+#tip { position: fixed; pointer-events: none; z-index: 50; background: var(--ink); color: var(--page); padding: 6px 9px; border-radius: 6px; font-size: 12px; max-width: 320px; display: none; white-space: pre-line; }
+dialog { width: min(1000px, 94vw); max-height: 90vh; border: 1px solid var(--border); border-radius: 12px; padding: 0; background: var(--surface); color: var(--ink); }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+dialog .dhead { position: sticky; top: 0; background: var(--surface); padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+dialog .dbody { padding: 16px; }
+#toast { position: fixed; bottom: 16px; right: 16px; z-index: 60; max-width: 520px; }
+#toast .t { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--good); border-radius: 8px; padding: 10px 12px; margin-top: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.15); white-space: pre-wrap; font-size: 13px; }
+#toast .t.err { border-left-color: var(--critical); }
+.subtabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+.subtabs button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 13px; }
+.kv dt { color: var(--ink-2); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+.chat .msg { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.chat .who { font-weight: 600; font-size: 12px; }
+.chat .bot .who { color: var(--accent); }
+.thread-card { cursor: pointer; } .thread-card:hover { border-color: var(--ink-3); }
+.err-box { background: var(--critical-bg); padding: 10px; border-radius: 8px; }
+@media (max-width: 640px) { .cols-2 { grid-template-columns: 1fr; } main { padding: 12px 16px; } .kpi .value { font-size: 18px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <span class="brand">🧪 Lab console</span>
+    <select id="project" hidden></select>
+    <span id="health"></span>
+    <span class="spacer"></span>
+    <span class="small muted" id="updated"></span>
+    <label class="small row" style="gap:4px"><input type="checkbox" id="auto" checked> auto-refresh</label>
+    <button id="refresh" title="Refresh now">↻</button>
+    <button id="theme" title="Toggle light/dark">◐</button>
+  </div>
+  <nav id="nav"></nav>
+</header>
+<main id="main"><p class="muted">Loading…</p></main>
+<div id="tip"></div>
+<div id="toast"></div>
+<dialog id="dlg"><div class="dhead"><strong id="dlg-title"></strong><span class="spacer"></span><button onclick="dlg.close()">Close</button></div><div class="dbody" id="dlg-body"></div></dialog>
+
+<script>
+"use strict";
+const TABS = [["overview", "Overview"], ["threads", "Threads"], ["gpus", "GPUs & spend"], ["runs", "Agent runs"],
+              ["events", "Events"], ["discord", "Discord"], ["inbox", "Inbox"], ["world", "World"]];
+const S = { project: null, tz: undefined, overview: null, filters: { runs: {}, events: { hide_agent: "1" } },
+            extra: { runs: [], events: [] }, sub: {}, open: new Set() };
+const $ = (s, el = document) => el.querySelector(s);
+const main = $("#main"), dlg = $("#dlg");
+
+// ------------------------------------------------------------------ utils
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const money = (v, d = 2) => v == null ? "—" : "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+function ago(ts) {
+  if (!ts) return "never";
+  const d = Date.now() / 1000 - ts, f = d < 0 ? "in " : "", a = Math.abs(d), s = d < 0 ? "" : " ago";
+  if (a < 90) return f + Math.round(a) + "s" + s;
+  if (a < 5400) return f + Math.round(a / 60) + " min" + s;
+  if (a < 172800) return f + (a / 3600).toFixed(1) + " h" + s;
+  return f + (a / 86400).toFixed(1) + " d" + s;
+}
+function when(ts) {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleString(undefined, { timeZone: S.tz, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+const dur = (a, b) => { if (!a) return "—"; const s = (b || Date.now() / 1000) - a; return s < 90 ? Math.round(s) + "s" : s < 5400 ? Math.round(s / 60) + "m" : (s / 3600).toFixed(1) + "h"; };
+const tsCell = ts => `<span data-tip="${esc(when(ts))}">${esc(ago(ts))}</span>`;
+function statusPill(s) {
+  const m = { ok: "good", running: "info", queued: "", granted: "good", active: "good", sent: "good", deployed: "good", accepted: "good", done: "good", closed: "",
+              error: "critical", timeout: "critical", failed: "critical", rolled_back: "critical", denied: "warning", ratelimited: "warning",
+              provisioning: "info", requested: "info", awaiting_approval: "warning", pending: "info", unknown: "warning", open: "warning",
+              proposed: "info", retired: "", released: "", rejected: "", major: "critical", normal: "warning", minor: "info", info: "" };
+  return `<span class="pill ${m[s] ?? ""}">${esc(s ?? "—")}</span>`;
+}
+const who = (role, key) => esc(role) + (key ? `<span class="muted">/${esc(key.length > 12 ? key.slice(0, 6) + "…" : key)}</span>` : "");
+
+function md(src) {
+  if (src == null) return "";
+  const lines = String(src).replace(/\r/g, "").split("\n");
+  const inline = t => esc(t)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  let out = "", i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (/^```/.test(l)) {
+      const buf = []; i++;
+      while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      i++; out += `<pre><code>${esc(buf.join("\n"))}</code></pre>`; continue;
+    }
+    let m;
+    if ((m = l.match(/^(#{1,6})\s+(.*)/))) { const n = Math.min(m[1].length, 4); out += `<h${n}>${inline(m[2])}</h${n}>`; i++; continue; }
+    if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+      const cells = r => r.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      let t = "<div class='scroll'><table><tr>" + cells(l).map(c => `<th>${inline(c)}</th>`).join("") + "</tr>"; i += 2;
+      while (i < lines.length && /^\s*\|/.test(lines[i])) t += "<tr>" + cells(lines[i++]).map(c => `<td>${inline(c)}</td>`).join("") + "</tr>";
+      out += t + "</table></div>"; continue;
+    }
+    if (/^\s*([-*+]|\d+\.)\s+/.test(l)) {
+      const ordered = /^\s*\d+\./.test(l); let t = ordered ? "<ol>" : "<ul>";
+      while (i < lines.length && (/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) || (/^\s{2,}\S/.test(lines[i])))) {
+        const x = lines[i++];
+        if (/^\s*([-*+]|\d+\.)\s+/.test(x)) t += "<li>" + inline(x.replace(/^\s*([-*+]|\d+\.)\s+/, "")) + "</li>";
+        else t = t.replace(/<\/li>$/, " " + inline(x.trim()) + "</li>");
+      }
+      out += t + (ordered ? "</ol>" : "</ul>"); continue;
+    }
+    if (/^>\s?/.test(l)) { const buf = []; while (i < lines.length && /^>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, "")); out += `<blockquote>${inline(buf.join(" "))}</blockquote>`; continue; }
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(l)) { out += "<hr>"; i++; continue; }
+    if (!l.trim()) { i++; continue; }
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|>|\s*([-*+]|\d+\.)\s+|\s*\|)/.test(lines[i])) buf.push(lines[i++]);
+    if (!buf.length) buf.push(lines[i++]);
+    out += `<p>${buf.map(inline).join("<br>")}</p>`;
+  }
+  return `<div class="md">${out}</div>`;
+}
+
+// ------------------------------------------------------------------ data + actions
+async function api(path, params = {}) {
+  const q = new URLSearchParams({ ...(S.project ? { project: S.project } : {}), ...params });
+  const r = await fetch(`/api/${path}?${q}`);
+  const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+function toast(text, ok = true) {
+  const el = document.createElement("div"); el.className = "t" + (ok ? "" : " err"); el.textContent = text;
+  $("#toast").appendChild(el); setTimeout(() => el.remove(), ok ? 7000 : 15000);
+}
+async function act(body, confirmText) {
+  if (confirmText && !confirm(confirmText)) return false;
+  try {
+    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Lab-Web": "1" },
+                                           body: JSON.stringify({ project: S.project, ...body }) });
+    const j = await r.json();
+    toast((j.command ? "$ " + j.command + "\n" : "") + (j.output || (j.ok ? "done" : "failed")), !!j.ok);
+    if (j.ok) setTimeout(refresh, 400);
+    return !!j.ok;
+  } catch (e) { toast("Action failed: " + e.message, false); return false; }
+}
+function draftVal(id) { const el = document.getElementById(id); return el ? el.value.trim() : ""; }
+function clearDraft(id) { const el = document.getElementById(id); if (el) el.value = ""; }
+
+// ------------------------------------------------------------------ charts (inline SVG)
+function barChart(data, series, { h = 180, fmt = v => money(v, 0) } = {}) {
+  const W = 640, H = h, L = 44, B = 22, T = 8, R = 6;
+  const max = Math.max(1, ...data.map(d => series.reduce((s, x) => s + (d[x.key] || 0), 0)));
+  const nice = niceMax(max), iw = W - L - R, ih = H - T - B, bw = iw / data.length;
+  let g = "";
+  for (let k = 0; k <= 4; k++) { const y = T + ih - ih * k / 4; g += `<line class="grid-line" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${esc(fmt(nice * k / 4))}</text>`; }
+  data.forEach((d, i) => {
+    let y0 = T + ih; const x = L + i * bw + bw * 0.15, w = bw * 0.7;
+    const tip = d.day + "\n" + series.map(s => `${s.label}: ${money(d[s.key])}`).join("\n") + `\nTotal: ${money(series.reduce((a, s) => a + (d[s.key] || 0), 0))}`;
+    series.forEach((s, si) => {
+      const v = d[s.key] || 0; if (!v) return;
+      const hh = Math.max(1, ih * v / nice), top = si === series.length - 1 || !series.slice(si + 1).some(n => d[n.key]);
+      const y = y0 - hh;
+      g += top ? `<path d="${roundTop(x, y, w, hh - (si ? 2 : 0), 4)}" fill="${s.color}"/>` : `<rect x="${x}" y="${y}" width="${w}" height="${Math.max(0.5, hh - (si ? 2 : 0))}" fill="${s.color}"/>`;
+      y0 = y;
+    });
+    g += `<rect x="${L + i * bw}" y="${T}" width="${bw}" height="${ih}" fill="transparent" data-tip="${esc(tip)}"/>`;
+    if (data.length <= 16 || i % 2 === 0) g += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${esc(d.day)}</text>`;
+  });
+  return `<div class="legend">${series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("")}</div>
+          <div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img">${g}</svg></div>`;
+}
+function roundTop(x, y, w, h, r) { r = Math.min(r, w / 2, h); return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`; }
+function niceMax(v) { const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
+function resultsChart(results) {
+  if (!results.length) return `<p class="muted">No results logged yet.</p>`;
+  const W = 640, H = 200, L = 52, B = 22, T = 10, R = 10;
+  const vals = results.map(r => r.value), ts = results.map(r => r.ts);
+  let lo = Math.min(...vals), hi = Math.max(...vals); if (lo === hi) { lo -= 1; hi += 1; }
+  const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
+  const t0 = Math.min(...ts), t1 = Math.max(...ts) === t0 ? t0 + 1 : Math.max(...ts);
+  const X = t => results.length > 1 ? L + (W - L - R) * (t - t0) / (t1 - t0) : L + (W - L - R) / 2;
+  const Y = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  let g = "";
+  for (let k = 0; k <= 4; k++) { const v = lo + (hi - lo) * k / 4, y = Y(v); g += `<line class="grid-line" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${v.toPrecision(3)}</text>`; }
+  if (lo < 0 && hi > 0) g += `<line x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--ink-3)" stroke-dasharray="3 3"/>`;
+  const kept = results.filter(r => r.kept);
+  if (kept.length > 1) g += `<polyline fill="none" stroke="var(--series-1)" stroke-width="2" points="${kept.map(r => X(r.ts) + "," + Y(r.value)).join(" ")}"/>`;
+  results.forEach(r => {
+    const tip = `${when(r.ts)} ${r.run || ""}\n${r.metric} = ${r.value}\n${r.kept ? "KEPT" : "discarded"}${r.cost_usd ? " · " + money(r.cost_usd) : ""}\n${(r.description || "").slice(0, 200)}`;
+    g += `<circle cx="${X(r.ts)}" cy="${Y(r.value)}" r="5" stroke="var(--surface)" stroke-width="2" fill="${r.kept ? "var(--series-1)" : "var(--surface)"}"/>`;
+    if (!r.kept) g += `<circle cx="${X(r.ts)}" cy="${Y(r.value)}" r="4" fill="none" stroke="var(--series-1)" stroke-width="2"/>`;
+    g += `<circle cx="${X(r.ts)}" cy="${Y(r.value)}" r="12" fill="transparent" data-tip="${esc(tip)}"/>`;
+  });
+  g += `<text x="${L}" y="${H - 6}">${esc(when(t0))}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${esc(when(t1))}</text>`;
+  return `<div class="legend"><span><i style="background:var(--series-1);border-radius:50%"></i>kept</span><span><i style="border:2px solid var(--series-1);border-radius:50%;background:none"></i>discarded</span></div>
+          <div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img">${g}</svg></div>`;
+}
+function budgetMeter(b) {
+  const cap = b.daily_cap || 1, sp = Math.min(100, b.spent_today / cap * 100), rs = Math.min(100 - sp, b.reserved / cap * 100);
+  const lvl = b.spent_today >= cap ? "critical" : (b.spent_today + b.reserved) >= 0.8 * cap ? "warning" : "good";
+  return `<div class="meter" data-tip="Spent ${money(b.spent_today)} + reserved ${money(b.reserved)} of ${money(cap, 0)}\nMarker: 80% alert">
+            <div class="spent" style="width:${sp}%"></div><div class="res" style="left:${sp}%;width:${rs}%"></div><div class="tick" style="left:80%"></div></div>
+          <div class="legend"><span><i style="background:var(--series-1)"></i>spent ${money(b.spent_today)}</span>
+          <span><i style="background:repeating-linear-gradient(45deg,var(--series-1) 0 2px,transparent 2px 5px)"></i>reserved ${money(b.reserved)}</span>
+          <span>cap ${money(cap, 0)}</span><span class="pill ${lvl}">${Math.round((b.spent_today + b.reserved) / cap * 100)}% committed</span></div>`;
+}
+
+// ------------------------------------------------------------------ header
+function renderHeader(o) {
+  const hbAge = Date.now() / 1000 - o.heartbeat;
+  const lvl = hbAge > 120 ? "critical" : o.service !== "active" && o.service !== "unknown" ? "warning" : "good";
+  $("#health").innerHTML = `<span class="pill ${lvl}" data-tip="labd heartbeat ${esc(ago(o.heartbeat))}; systemd: ${esc(o.service)}">labd ${hbAge > 120 ? "DOWN?" : "up"} · ${esc(ago(o.heartbeat))}</span>
+    ${o.paused ? `<span class="pill warning">GPUs paused</span>` : ""}
+    <span class="pill" data-tip="Spent today + reserved / daily cap">${money(o.budget.spent_today, 0)} + ${money(o.budget.reserved, 0)} / ${money(o.budget.daily_cap, 0)}</span>`;
+  const badges = { overview: o.alerts.filter(a => a.level !== "info").length, inbox: o.counts.tickets + o.counts.ideas + o.counts.maint };
+  const cur = route().tab;
+  $("#nav").innerHTML = TABS.map(([k, v]) => `<a href="#${k}" class="${cur === k ? "on" : ""}">${v}${badges[k] ? `<span class="badge">${badges[k]}</span>` : ""}</a>`).join("");
+  const sel = $("#project");
+  if (o.projects.length > 1) { sel.hidden = false; sel.innerHTML = o.projects.map(p => `<option ${p === o.project ? "selected" : ""}>${esc(p)}</option>`).join(""); }
+  S.project = S.project || o.project; S.tz = o.timezone;
+  $("#updated").textContent = "updated " + new Date().toLocaleTimeString(undefined, { hour12: false });
+}
+
+// ------------------------------------------------------------------ views
+const V = {};
+
+V.overview = async () => {
+  const o = S.overview;
+  const alerts = o.alerts.length ? o.alerts.map(a => `<div class="alert ${a.level}"><span class="ico">${{ critical: "■", warning: "▲", info: "●" }[a.level]}</span>
+      <div style="flex:1"><span class="lvl">${a.level}</span>${esc(a.text)}</div><a href="#${a.tab}" class="small">view</a></div>`).join("")
+    : `<div class="alert good"><span class="ico">✓</span><div>All clear — nothing needs you right now.</div></div>`;
+  const hbAge = Date.now() / 1000 - o.heartbeat;
+  const r24 = o.runs_24h;
+  const kpis = `<div class="grid kpis">
+    <div class="card kpi"><div class="label">Daemon (labd)</div><div class="value">${hbAge > 120 ? "down?" : "up"}</div><div class="note">heartbeat ${esc(ago(o.heartbeat))} · systemd ${esc(o.service)}</div></div>
+    <div class="card kpi"><div class="label">Budget today</div><div class="value">${money(o.budget.spent_today, 0)} <span class="small muted">/ ${money(o.budget.daily_cap, 0)}</span></div><div class="note">+ ${money(o.budget.reserved, 0)} reserved · agents ${money(o.agent_cost_today, 0)}</div></div>
+    <div class="card kpi"><div class="label">GPU burn</div><div class="value">${money(o.burn_hr)}/h</div><div class="note">${o.leases.filter(l => l.status === "granted").length} granted lease(s)${o.paused ? " · PAUSED" : ""}</div></div>
+    <div class="card kpi"><div class="label">Agents</div><div class="value">${o.running.length} running</div><div class="note">${o.queued.length} queued · ${r24.n} runs/24h · ${r24.e || 0} failed · ${money(r24.c, 0)}</div></div>
+    <div class="card kpi"><div class="label">Research threads</div><div class="value">${o.threads.length} <span class="small muted">/ ${o.limits.max_threads} max</span></div><div class="note">world ${esc(o.world_version || "?")}</div></div>
+  </div>`;
+  const running = o.running.map(r => `<div class="list-item row"><span class="pill info">running</span> <a href="javascript:openRun(${r.id})">run ${r.id}</a> ${who(r.role, r.key)}
+      <span class="muted small">${esc(r.model || "")} · ${esc(dur(r.started_at))}</span></div>`).join("")
+    + o.queued.map(r => `<div class="list-item row"><span class="pill">queued</span> run ${r.id} ${who(r.role, r.key)} <span class="muted small">${esc(ago(r.queued_at))}</span></div>`).join("");
+  const leases = o.leases.map(leaseLine).join("") || `<p class="muted">No active GPU leases.</p>`;
+  const threads = o.threads.map(t => `<div class="list-item"><div class="row"><a href="#threads/${t.id}"><strong>${esc(t.id)}</strong></a> <span class="clip" style="flex:1">${esc(t.title)}</span></div>
+      <div class="small muted">${t.passes} passes · last ${esc(ago(t.last_pass_at))} · best ${t.best_value ?? "—"} · ${money(t.spent_usd)} GPU · ctx ${t.context_tokens ? Math.round(t.context_tokens / 1000) + "k" : "—"}</div></div>`).join("") || `<p class="muted">No active threads.</p>`;
+  const recent = o.recent.map(e => `<div class="list-item small"><span class="muted">${tsCell(e.ts)}</span> ${statusPill(e.severity)} <span class="mono">${esc(e.topic)}${e.key ? " " + esc(e.key) : ""}</span><div class="clamp">${esc(e.summary)}</div></div>`).join("");
+  const sch = o.schedule;
+  return `<div class="stack">
+    <div class="card"><h2>Needs attention</h2>${alerts}</div>
+    ${kpis}
+    <div class="card"><h2>Budget today <span class="sub">spent + reserved (remaining hours of active leases)</span></h2>${budgetMeter(o.budget)}</div>
+    <div class="grid cols-2">
+      <div class="card"><h2>Running now</h2>${running || `<p class="muted">No agents running.</p>`}<h2 style="margin-top:14px">GPU leases</h2>${leases}</div>
+      <div class="card"><h2>Active threads <a href="#threads" class="small">all</a></h2>${threads}
+        <h2 style="margin-top:14px">Coming up</h2>
+        <dl class="kv"><dt>Director tick</dt><dd>${esc(when(sch.next_director))} (${esc(ago(sch.next_director))})</dd>
+        <dt>Daily report</dt><dd>${esc(when(sch.next_daily_report))} (${esc(ago(sch.next_daily_report))})</dd>
+        ${sch.next_explore ? `<dt>Explore</dt><dd>${esc(when(sch.next_explore))}</dd>` : ""}
+        ${o.backoff_until > Date.now() / 1000 ? `<dt>Rate-limit backoff</dt><dd>until ${esc(when(o.backoff_until))}</dd>` : ""}</dl></div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card"><h2>Notable events <a href="#events" class="small">all</a></h2>${recent || `<p class="muted">None.</p>`}</div>
+      <div class="card"><h2>Operator actions</h2><div class="stack">
+        ${pauseControl(o.paused)}
+        <div class="row"><button onclick="act({action:'daily_report'}, 'Queue a daily report now? (The Analyst writes and posts it to Discord.)')">Send a daily report now</button></div>
+        <p class="small muted">Every action runs the matching <code>lab</code> command as you and shows its output.</p></div></div>
+    </div></div>`;
+};
+
+function pauseControl(paused) {
+  return paused
+    ? `<div class="alert warning"><span class="ico">▲</span><div style="flex:1">GPUs paused since ${esc(when(paused.at))}: ${esc(paused.reason)}</div>
+       <button class="primary" onclick="act({action:'gpu_resume'}, 'Resume GPU work? Threads may rent GPUs again (within the daily budget).')">Resume GPUs</button></div>`
+    : `<div class="row"><input id="pause-reason" class="draft" placeholder="reason (optional)" style="flex:1;min-width:160px">
+       <button class="danger" onclick="act({action:'gpu_pause', reason: draftVal('pause-reason')}, 'Pause ALL GPU work? labd stops every lab pod now and rents nothing until you resume.').then(ok => ok && clearDraft('pause-reason'))">Pause all GPUs</button></div>`;
+}
+
+function leaseLine(l) {
+  const j = l.job || {};
+  const jobLvl = l.status !== "granted" ? "info" : l.job_state === "running" ? "good" : "warning";
+  return `<div class="list-item"><div class="row">${statusPill(l.status)} <strong>lease ${l.id}</strong> <a href="#threads/${esc(l.holder)}">${esc(l.holder)}</a>
+      <span>${l.gpu_count}× ${esc(l.gpu_short)}</span> <span class="muted small">${esc(l.cloud || "")} ${esc(l.pod_name || "")}</span>
+      <span class="spacer"></span><span class="num">${l.price_hr ? money(l.price_hr) + "/h" : ""}</span></div>
+    <div class="small muted row">${l.status === "granted" ? `<span class="pill ${jobLvl}">job ${esc(l.job_name || "—")}: ${esc(l.job_state || "none")}</span>
+      heartbeat ${esc(ago(l.heartbeat_at))} · up ${esc(dur(l.granted_at))} of ≤${l.max_hours}h · ${money(l.cost_so_far)} so far` : esc(l.reason || "")}</div></div>`;
+}
+
+V.threads = async (id) => {
+  if (id) return threadDetail(id);
+  const d = await api("threads");
+  const cards = d.threads.map(t => `<div class="card thread-card" onclick="location.hash='threads/${esc(t.id)}'">
+      <div class="row"><strong>${esc(t.id)}</strong> ${statusPill(t.status)} ${t.running ? `<span class="pill info">working</span>` : ""} ${t.rotate_pending ? `<span class="pill">handover next pass</span>` : ""}</div>
+      <div style="margin:6px 0">${esc(t.title)}</div>
+      <div class="small muted">metric: ${esc(t.metric || "—")}</div>
+      <dl class="kv" style="margin-top:8px"><dt>Best</dt><dd>${t.best_value ?? "—"} <span class="muted">${esc((t.best_desc || "").slice(0, 120))}</span></dd>
+      <dt>Results</dt><dd>${t.results} (${t.kept} kept)</dd><dt>Passes</dt><dd>${t.passes} · last ${esc(ago(t.last_pass_at))}${t.status === "active" && t.wake ? " · next wake " + esc(ago(t.wake)) : ""}</dd>
+      <dt>Session</dt><dd>#${t.generation || 1}, ${t.context_tokens ? Math.round(t.context_tokens / 1000) + "k" : "?"} / ${Math.round(d.rotate_tokens / 1000)}k tokens</dd>
+      <dt>Spent</dt><dd>${money(t.spent_usd)} GPU · ${money(t.agent_cost)} Claude</dd>
+      ${t.leases.length ? `<dt>GPUs</dt><dd>${t.leases.map(l => `${l.gpu_count}×${esc(l.gpu_short)} (${esc(l.job_state || l.status)})`).join(", ")}</dd>` : ""}
+      ${t.status === "retired" ? `<dt>Retired</dt><dd>${esc(ago(t.retired_at))}: ${esc(t.retire_reason || "")}</dd>` : ""}</dl></div>`).join("");
+  return `<h1>Research threads</h1>
+    <div class="card" style="margin-bottom:16px"><h2>Message every active thread</h2>
+      <textarea id="note-all" class="draft" placeholder="Guidance for all active threads (they read it on their next pass)"></textarea>
+      <div class="row" style="margin-top:6px"><button class="primary" onclick="sendNote('all','note-all')">Send to all</button></div></div>
+    <div class="grid cols-2">${cards || `<p class="muted">No threads yet.</p>`}</div>`;
+};
+async function sendNote(id, field) {
+  const text = draftVal(field);
+  if (!text) return toast("Write a message first.", false);
+  if (await act({ action: "thread_note", id, text }, `Send this message to ${id === "all" ? "all active threads" : id}? It wakes the thread.`)) clearDraft(field);
+}
+async function threadDetail(id) {
+  const d = await api("threads/" + encodeURIComponent(id)), t = d.thread;
+  const files = Object.keys(d.files); const cur = S.sub[id] && files.includes(S.sub[id]) ? S.sub[id] : files[0];
+  const results = d.results.slice().reverse().map(r => `<tr><td>${tsCell(r.ts)}</td><td class="mono">${esc(r.run || "")}</td><td class="mono">${esc(r.metric)}</td><td class="num">${r.value}</td>
+      <td>${r.kept ? `<span class="pill good">kept</span>` : `<span class="pill">discarded</span>`}</td><td class="num">${money(r.cost_usd)}</td><td>${esc(r.description)}</td></tr>`).join("");
+  const runs = d.runs.map(r => `<tr class="click" onclick="openRun(${r.id})"><td>${r.id}</td><td>${statusPill(r.status)}</td><td class="small">${esc((r.model || "").replace("claude-", ""))}</td>
+      <td>${tsCell(r.started_at || r.queued_at)}</td><td class="num">${dur(r.started_at, r.ended_at)}</td><td class="num">${money(r.cost_usd)}</td><td><div class="clamp small">${esc(r.summary)}</div></td></tr>`).join("");
+  return `<div class="row" style="margin-bottom:10px"><a href="#threads">← threads</a></div>
+    <h1>${esc(t.id)} — ${esc(t.title)} ${statusPill(t.status)}</h1>
+    <div class="grid kpis" style="margin-bottom:16px">
+      <div class="card kpi"><div class="label">Best ${esc((t.metric || "").split(" ")[0])}</div><div class="value">${t.best_value ?? "—"}</div><div class="note clamp">${esc(t.best_desc || "")}</div></div>
+      <div class="card kpi"><div class="label">Passes</div><div class="value">${t.passes}</div><div class="note">last ${esc(ago(t.last_pass_at))}</div></div>
+      <div class="card kpi"><div class="label">GPU spend</div><div class="value">${money(d.spend)}</div><div class="note">Claude ${money(d.agent_cost)}</div></div>
+      <div class="card kpi"><div class="label">Session</div><div class="value">#${t.generation || 1}</div><div class="note">${t.context_tokens ? Math.round(t.context_tokens / 1000) + "k tokens" : ""} · ${t.session_passes || 0} passes</div></div>
+    </div>
+    ${t.status === "active" ? `<div class="card" style="margin-bottom:16px"><h2>Message ${esc(t.id)}</h2>
+      <textarea id="note-${esc(t.id)}" class="draft" placeholder="Guidance or a question; it wakes the thread and reaches it on its next pass"></textarea>
+      <div class="row" style="margin-top:6px"><button class="primary" onclick="sendNote('${esc(t.id)}','note-${esc(t.id)}')">Send</button></div></div>` : ""}
+    <div class="grid cols-2">
+      <div class="card"><h2>Results <span class="sub">${esc(t.metric || "")}</span></h2>${resultsChart(d.results)}</div>
+      <div class="card"><h2>GPU leases</h2>${d.leases.map(leaseLine).join("") || `<p class="muted">None.</p>`}</div>
+    </div>
+    ${d.results.length ? `<div class="card" style="margin-top:16px"><h2>All results</h2><div class="scroll"><table><tr><th>When</th><th>Run</th><th>Metric</th><th class="num">Value</th><th></th><th class="num">Cost</th><th>What</th></tr>${results}</table></div></div>` : ""}
+    <div class="card" style="margin-top:16px"><h2>Files <span class="sub mono">${esc(d.workdir)}</span></h2>
+      <div class="subtabs">${files.map(f => `<button class="${f === cur ? "on" : ""}" onclick="S.sub['${esc(id)}']='${f}';render()">${esc(f)}</button>`).join("")}</div>
+      <div class="md-box">${cur ? md(d.files[cur]) : `<p class="muted">No files.</p>`}</div></div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><h2>Passes (agent runs)</h2><div class="scroll"><table><tr><th>#</th><th></th><th>Model</th><th>When</th><th class="num">Took</th><th class="num">Cost</th><th>Report</th></tr>${runs}</table></div></div>
+      <div class="card"><h2>Events</h2>${d.events.map(e => `<div class="list-item small"><span class="muted">${tsCell(e.ts)}</span> ${statusPill(e.severity)} <span class="mono">${esc(e.topic)}</span><div class="clamp">${esc(e.summary)}</div></div>`).join("") || `<p class="muted">None.</p>`}</div>
+    </div>`;
+}
+
+V.gpus = async () => {
+  const d = await api("gpus");
+  const filt = S.filters.stock || "";
+  const offers = d.offers.filter(o => !filt || (o.gpu + " " + o.cloud).toLowerCase().includes(filt.toLowerCase()));
+  const pods = d.pods.map(p => `<tr><td>${esc(p.name)}<div class="small muted mono">${esc(p.id)}</div></td><td>${statusPill((p.state || "").toLowerCase())}${p.terminated ? ` <span class="pill">gone</span>` : ""}</td>
+      <td>${p.gpu_count}× ${esc((p.gpu_type || "").replace("NVIDIA ", ""))}</td><td>${esc(p.cloud)}</td><td class="num">${money(p.price_hr)}/h</td><td>${esc(p.lease_id || "—")}</td>
+      <td>${esc(p.last_experiment || "")}</td><td>${tsCell(p.created_at)}</td><td>${tsCell(p.last_seen)}</td></tr>`).join("");
+  const hist = d.history.map(l => `<tr><td>${l.id}</td><td>${statusPill(l.status)}</td><td>${esc(l.holder)}</td><td>${l.gpu_count}× ${esc(l.gpu_short)}</td><td>${esc(l.cloud || "")}</td>
+      <td class="num">${l.price_hr ? money(l.price_hr) + "/h" : "—"}</td><td class="num">${l.cost_so_far ? money(l.cost_so_far) : "—"}</td><td>${tsCell(l.requested_at)}</td><td class="small">${esc(l.reason || "")}</td></tr>`).join("");
+  return `<h1>GPUs & spend</h1><div class="stack">
+    <div class="grid cols-2">
+      <div class="card"><h2>Budget today</h2>${budgetMeter(d.budget)}<div style="margin-top:12px">${pauseControl(d.paused)}</div></div>
+      <div class="card"><h2>Active leases</h2>${d.active.map(l => leaseLine(l) + (l.job ? `<details class="small" ${S.open.has("job" + l.id) ? "open" : ""} data-k="job${l.id}"><summary>job details</summary><pre>${esc(JSON.stringify(l.job, null, 1))}</pre></details>` : "")).join("") || `<p class="muted">No active leases.</p>`}</div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card"><h2>Spend per day <span class="sub">last 14 days, ${esc(S.tz || "")}</span></h2>
+        ${barChart(d.daily, [{ key: "gpu", label: "GPU (ledger)", color: "var(--series-1)" }, { key: "agents", label: "Claude agents (list price)", color: "var(--series-2)" }])}
+        <details ${S.open.has("dailytbl") ? "open" : ""} data-k="dailytbl"><summary class="small">table</summary><table><tr><th>Day</th><th class="num">GPU</th><th class="num">Agents</th></tr>${d.daily.slice().reverse().map(x => `<tr><td>${x.day}</td><td class="num">${money(x.gpu)}</td><td class="num">${money(x.agents)}</td></tr>`).join("")}</table></details></div>
+      <div class="card"><h2>Where the money went</h2>
+        <table><tr><th>GPU holder</th><th class="num">Today</th><th class="num">All time</th></tr>${d.by_holder.map(h => `<tr><td>${esc(h.holder)}</td><td class="num">${money(h.today)}</td><td class="num">${money(h.total)}</td></tr>`).join("")}</table>
+        <table style="margin-top:12px"><tr><th>Agent role</th><th class="num">Runs</th><th class="num">Today</th><th class="num">All time</th></tr>${d.by_role.map(h => `<tr><td>${esc(h.role)}</td><td class="num">${h.n}</td><td class="num">${money(h.today)}</td><td class="num">${money(h.total)}</td></tr>`).join("")}</table></div>
+    </div>
+    <div class="card"><h2>Lab pods</h2><div class="scroll"><table><tr><th>Pod</th><th>State</th><th>GPUs</th><th>Cloud</th><th class="num">Price</th><th>Lease</th><th>Last holder</th><th>Created</th><th>Seen</th></tr>${pods}</table></div></div>
+    <div class="card"><h2>Lease history</h2><div class="scroll"><table><tr><th>#</th><th></th><th>Holder</th><th>GPUs</th><th>Cloud</th><th class="num">Price</th><th class="num">Cost</th><th>Requested</th><th>Reason</th></tr>${hist}</table></div></div>
+    <div class="card"><h2>GPU stock <span class="sub">labd's feed, ${esc(ago(d.stock_at))}; price per GPU-hour</span></h2>
+      <input placeholder="filter, e.g. H100 or VAST" value="${esc(filt)}" oninput="S.filters.stock=this.value;clearTimeout(window._sf);window._sf=setTimeout(render,300)">
+      <div class="scroll" style="max-height:420px;margin-top:8px"><table><tr><th>GPU</th><th class="num">Count</th><th>Cloud</th><th>Stock</th><th class="num">$/GPU/h</th><th class="num">$/h</th></tr>
+      ${offers.slice(0, 200).map(o => `<tr><td>${esc(o.gpu.replace("NVIDIA ", ""))}</td><td class="num">${o.count}</td><td>${esc(o.cloud)}</td><td>${esc(o.stock)}</td><td class="num">${money(o.price_gpu_hr)}</td><td class="num">${o.price_gpu_hr ? money(o.price_gpu_hr * o.count) : "—"}</td></tr>`).join("")}</table></div></div>
+  </div>`;
+};
+
+V.runs = async (id) => {
+  if (id) { openRun(id); location.hash = "runs"; return null; }
+  const f = S.filters.runs;
+  const d = await api("runs", f);
+  const all = S.lastRuns = d.runs.concat(S.extra.runs);
+  const opt = (name, vals) => `<select onchange="S.filters.runs.${name}=this.value;S.extra.runs=[];render()"><option value="">all ${name}s</option>${vals.map(v => `<option ${f[name] === v ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+  return `<h1>Agent runs</h1><div class="card"><div class="row" style="margin-bottom:8px">${opt("role", d.roles)}${opt("status", ["running", "queued", "ok", "error", "timeout", "ratelimited"])}
+      <span class="small muted">Click a run for its report, usage, triggering events and prompt.</span></div>
+    <div class="scroll"><table><tr><th>#</th><th>Agent</th><th></th><th>Model</th><th>Queued</th><th class="num">Took</th><th class="num">Turns</th><th class="num">Cost</th><th>Result</th></tr>
+    ${all.map(r => `<tr class="click" onclick="openRun(${r.id})"><td>${r.id}</td><td>${who(r.role, r.key)}</td><td>${statusPill(r.status)}</td><td class="small">${esc((r.model || "").replace("claude-", ""))}</td>
+      <td>${tsCell(r.queued_at)}</td><td class="num">${dur(r.started_at, r.ended_at)}</td><td class="num">${r.num_turns ?? ""}</td><td class="num">${money(r.cost_usd)}</td><td><div class="clamp small">${esc(r.summary)}</div></td></tr>`).join("")}</table></div>
+    ${all.length && all.length % 100 === 0 ? `<button style="margin-top:8px" onclick="more('runs')">Load older</button>` : ""}</div>`;
+};
+async function openRun(id) {
+  $("#dlg-title").textContent = "Run " + id; $("#dlg-body").innerHTML = "<p class='muted'>Loading…</p>"; if (!dlg.open) dlg.showModal();
+  try {
+    const d = await api("runs/" + id), r = d.run, u = d.usage || {};
+    $("#dlg-title").innerHTML = `Run ${r.id} · ${who(r.role, r.key)} ${statusPill(r.status)}`;
+    $("#dlg-body").innerHTML = `<dl class="kv"><dt>Model</dt><dd>${esc(r.model || "")}</dd><dt>Queued</dt><dd>${esc(when(r.queued_at))}</dd>
+      <dt>Ran</dt><dd>${esc(when(r.started_at))} → ${esc(when(r.ended_at))} (${dur(r.started_at, r.ended_at)})</dd>
+      <dt>Cost</dt><dd>${money(r.cost_usd)} · ${r.num_turns ?? "?"} turns${u.usage ? ` · in ${(u.usage.input_tokens || 0) + (u.usage.cache_read_input_tokens || 0) + (u.usage.cache_creation_input_tokens || 0)} / out ${u.usage.output_tokens} tokens` : ""}</dd>
+      ${u.terminal_reason ? `<dt>Ended</dt><dd>${esc(u.terminal_reason)}${u.is_error ? " (error)" : ""}</dd>` : ""}
+      ${r.session_id ? `<dt>Session</dt><dd class="mono">${esc(r.session_id)}</dd>` : ""}
+      ${r.log_path ? `<dt>Log</dt><dd class="mono">${esc(r.log_path)}</dd>` : ""}</dl>
+      ${r.error ? `<h3>Error</h3><div class="err-box"><pre>${esc(r.error)}</pre></div>` : ""}
+      ${u.permission_denials && u.permission_denials.length ? `<h3>Permission denials</h3><pre>${esc(JSON.stringify(u.permission_denials, null, 1))}</pre>` : ""}
+      <h3>Report</h3>${r.result ? md(r.result) : `<p class="muted">No result.</p>`}
+      ${d.events.length ? `<h3>Woken by</h3>${d.events.map(e => `<div class="list-item small"><span class="mono">#${e.id} ${esc(e.topic)}</span> ${statusPill(e.severity)} ${esc(e.summary)}</div>`).join("")}` : ""}
+      ${d.prompt ? `<details><summary>Prompt (${d.prompt.length} chars)</summary><pre>${esc(d.prompt)}</pre></details>` : ""}
+      ${d.raw_log ? `<details><summary>Raw log</summary><pre>${esc(d.raw_log)}</pre></details>` : ""}`;
+  } catch (e) { $("#dlg-body").innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
+}
+
+V.events = async () => {
+  const f = S.filters.events;
+  const d = await api("events", f);
+  const all = S.lastEvents = d.events.concat(S.extra.events);
+  return `<h1>Events</h1><div class="card"><div class="row" style="margin-bottom:8px">
+      <select onchange="S.filters.events.topic=this.value;S.extra.events=[];render()"><option value="">all topics</option>${d.topics.map(t => `<option ${f.topic === t + "." ? "selected" : ""} value="${esc(t)}.">${esc(t)}.*</option>`).join("")}</select>
+      <select onchange="S.filters.events.sev=this.value;S.extra.events=[];render()">${["", "minor", "normal", "major"].map(s => `<option value="${s}" ${(f.sev || "") === s ? "selected" : ""}>${s ? "≥ " + s : "any severity"}</option>`).join("")}</select>
+      <input placeholder="search summary" value="${esc(f.text || "")}" onchange="S.filters.events.text=this.value;S.extra.events=[];render()">
+      <input placeholder="key (e.g. t-002)" value="${esc(f.key || "")}" style="width:130px" onchange="S.filters.events.key=this.value;S.extra.events=[];render()">
+      <label class="small row" style="gap:4px"><input type="checkbox" ${f.hide_agent === "1" ? "checked" : ""} onchange="S.filters.events.hide_agent=this.checked?'1':'';S.extra.events=[];render()"> hide agent.started/finished</label></div>
+    <div class="scroll"><table><tr><th>#</th><th>When</th><th></th><th>Topic</th><th>Key</th><th>Summary</th></tr>
+    ${all.map(e => `<tr class="click" onclick="openEvent(${e.id})"><td>${e.id}</td><td>${tsCell(e.ts)}</td><td>${statusPill(e.severity)}</td><td class="mono">${esc(e.topic)}</td><td class="mono small">${esc(e.key || "")}</td><td><div class="clamp small">${esc(e.summary)}</div></td></tr>`).join("")}</table></div>
+    ${all.length && all.length % 150 === 0 ? `<button style="margin-top:8px" onclick="more('events')">Load older</button>` : ""}</div>`;
+};
+function openEvent(id) {
+  const e = S.lastEvents.find(x => x.id === id); if (!e) return;
+  $("#dlg-title").innerHTML = `Event #${e.id} · <span class="mono">${esc(e.topic)}</span> ${statusPill(e.severity)}`;
+  $("#dlg-body").innerHTML = `<dl class="kv"><dt>When</dt><dd>${esc(when(e.ts))} (${esc(ago(e.ts))})</dd>${e.key ? `<dt>Key</dt><dd class="mono">${esc(e.key)}</dd>` : ""}</dl>
+    <h3>Summary</h3>${md(e.summary)}${e.payload != null ? `<h3>Payload</h3><pre>${esc(typeof e.payload === "string" ? e.payload : JSON.stringify(e.payload, null, 1))}</pre>` : ""}`;
+  dlg.showModal();
+}
+async function more(kind) {
+  const list = (kind === "runs" ? S.lastRuns : S.lastEvents);
+  const before = Math.min(...list.map(x => x.id));
+  const d = await api(kind, { ...S.filters[kind], before });
+  S.extra[kind] = S.extra[kind].concat(d[kind]); render();
+}
+
+V.discord = async () => {
+  const d = await api("discord");
+  return `<h1>Discord</h1><div class="grid cols-2">
+    <div class="card chat"><h2>Channel messages <span class="sub">newest first</span></h2>${d.messages.map(m => `<div class="msg ${m.is_bot ? "bot" : ""}">
+      <div class="row"><span class="who">${esc(m.author_name || "?")}</span><span class="small muted">${tsCell(m.ts)}${m.channel_id !== d.channel_id ? " · in a thread" : ""}</span></div>
+      <div class="md-box" style="max-height:220px">${md(m.content)}</div></div>`).join("") || `<p class="muted">None.</p>`}</div>
+    <div class="card chat"><h2>Outbox <span class="sub">what the lab posted</span></h2>${d.outbox.map(m => `<div class="msg bot">
+      <div class="row">${statusPill(m.status)}<span class="who">${esc(m.author_role || "labd")}</span><span class="small muted">${tsCell(m.created_at)}</span></div>
+      ${m.error ? `<div class="err-box small">${esc(m.error)}</div>` : ""}
+      <details ${S.open.has("ob" + m.id) ? "open" : ""} data-k="ob${m.id}"><summary class="clip">${esc((m.content || "").slice(0, 160))}</summary><div class="md-box" style="max-height:400px">${md(m.content)}</div></details></div>`).join("") || `<p class="muted">None.</p>`}</div>
+  </div>`;
+};
+
+V.inbox = async () => {
+  const d = await api("inbox");
+  const maint = d.maint.map(m => `<div class="list-item"><div class="row"><strong>${esc(m.id)}</strong> ${statusPill(m.status)} <span class="small muted">${esc(m.author || "")} · ${tsCell(m.created_at)}</span></div>
+      <div>${esc(m.request)}</div>
+      ${m.summary ? `<details ${S.open.has("m" + m.id) ? "open" : ""} data-k="m${m.id}"><summary class="small">summary${m.files ? " & files" : ""}</summary>${md(m.summary)}${m.files ? `<pre>${esc(m.files)}</pre>` : ""}${m.protected ? `<p class="small">Protected paths touched: <span class="mono">${esc(m.protected)}</span></p>` : ""}</details>` : ""}
+      ${m.note ? `<div class="small muted">${esc(m.note)}</div>` : ""}
+      ${m.status === "awaiting_approval" ? `<div class="row" style="margin-top:6px"><button class="primary" onclick="act({action:'maint_approve',id:'${esc(m.id)}'},'Approve and deploy ${esc(m.id)}? labd merges it into the live lab and restarts.')">Approve & deploy</button>
+        <button onclick="act({action:'maint_reject',id:'${esc(m.id)}'},'Reject ${esc(m.id)}?')">Reject</button></div>` : ""}</div>`).join("");
+  const tickets = d.tickets.map(t => `<div class="list-item"><div class="row"><strong>ticket ${t.id}</strong> ${statusPill(t.status)} <span class="small muted">${esc(t.author || "")} · ${tsCell(t.created_at)}</span></div>
+      <div><strong>${esc(t.title)}</strong></div><div class="small md-box" style="max-height:200px">${md(t.body)}</div>
+      ${t.resolution ? `<div class="small muted">Resolution: ${esc(t.resolution)}</div>` : ""}
+      ${t.status === "open" ? `<div class="row" style="margin-top:6px"><input id="tk-${t.id}" class="draft" placeholder="resolution" style="flex:1"><button onclick="closeTicket(${t.id})">Close</button></div>` : ""}</div>`).join("");
+  const ideas = d.ideas.map(i => `<div class="list-item"><div class="row"><strong>idea ${i.id}</strong> ${statusPill(i.status)} <span class="small muted">p${i.priority} · ${esc(i.author || "")} · ${tsCell(i.created_at)}${i.est_cost_usd ? " · est " + money(i.est_cost_usd, 0) : ""}</span></div>
+      <div><strong>${esc(i.title)}</strong></div>
+      <details ${S.open.has("i" + i.id) ? "open" : ""} data-k="i${i.id}"><summary class="small">hypothesis</summary><div class="small">${md(i.hypothesis)}${i.expected_gain ? `<p><strong>Expected gain:</strong> ${esc(i.expected_gain)}</p>` : ""}${i.notes ? `<p class="muted">Notes: ${esc(i.notes)}</p>` : ""}</div></details>
+      ${["proposed", "accepted"].includes(i.status) ? `<div class="row" style="margin-top:6px">${i.status === "proposed" ? `<button onclick="act({action:'idea_accept',id:'${i.id}'},'Accept idea ${i.id}?')">Accept</button>` : ""}
+        <button onclick="act({action:'idea_reject',id:'${i.id}'},'Reject idea ${i.id}?')">Reject</button><button onclick="act({action:'idea_done',id:'${i.id}'},'Mark idea ${i.id} done?')">Done</button></div>` : ""}</div>`).join("");
+  return `<h1>Inbox</h1><div class="grid cols-2">
+    <div class="stack">
+      <div class="card"><h2>Lab changes (maintainer)</h2>${maint || `<p class="muted">None.</p>`}
+        <h2 style="margin-top:14px">Request a lab change</h2><textarea id="maint-req" class="draft" placeholder="What should the maintainer change in the lab? (same as 'maint:' in Discord)"></textarea>
+        <div class="row" style="margin-top:6px"><button class="primary" onclick="maintReq()">Request change</button></div></div>
+      <div class="card"><h2>Tickets</h2>${tickets || `<p class="muted">None.</p>`}</div>
+    </div>
+    <div class="card"><h2>Ideas (Director's backlog)</h2>${ideas || `<p class="muted">None.</p>`}</div></div>`;
+};
+async function closeTicket(id) {
+  const text = draftVal("tk-" + id); if (!text) return toast("Write a resolution first.", false);
+  await act({ action: "ticket_close", id: String(id), text }, `Close ticket ${id}?`);
+}
+async function maintReq() {
+  const text = draftVal("maint-req"); if (!text) return toast("Describe the change first.", false);
+  if (await act({ action: "maint_request", text }, "Send this change request to the maintainer agent? Its report goes to Discord.")) clearDraft("maint-req");
+}
+
+V.world = async () => {
+  const d = await api("world");
+  return `<h1>World</h1><div class="stack">
+    ${d.lag ? `<div class="alert warning"><span class="ico">▲</span><div class="md-box">${md(d.lag)}</div></div>` : ""}
+    <div class="card"><h2>Live facts <span class="sub">world.json</span></h2><pre>${esc(d.facts)}</pre></div>
+    <div class="card"><h2>STATE.md <span class="sub">the Scout's picture</span></h2><div class="md-box">${md(d.state || "(none)")}</div></div>
+    ${d.known_stale ? `<div class="card"><h2>KNOWN_STALE.md</h2><div class="md-box">${md(d.known_stale)}</div></div>` : ""}
+    <div class="card"><h2>Recent briefs</h2>${d.briefs.map(b => `<details ${S.open.has("b" + b.name) ? "open" : ""} data-k="b${esc(b.name)}"><summary>${esc(b.name)}</summary><div class="md-box">${md(b.text)}</div></details>`).join("") || `<p class="muted">None.</p>`}</div>
+  </div>`;
+};
+
+// ------------------------------------------------------------------ routing + refresh
+function route() { const [tab, ...rest] = location.hash.replace(/^#/, "").split("/"); return { tab: TABS.some(t => t[0] === tab) ? tab : "overview", id: rest.join("/") || null }; }
+let rendering = false, lastRoute = "";
+function busy() {
+  // Don't redraw under the operator's hands: a focused field or an unsent draft would be lost.
+  const a = document.activeElement;
+  if (a && main.contains(a) && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) return true;
+  return [...main.querySelectorAll(".draft")].some(el => el.value.trim());
+}
+async function render(force = true) {
+  if (rendering) return; rendering = true;
+  const r = route(), key = r.tab + "/" + (r.id || "");
+  try {
+    main.querySelectorAll("details[data-k]").forEach(el => el.open ? S.open.add(el.dataset.k) : S.open.delete(el.dataset.k));
+    if (!force && busy()) return;
+    S.overview = await api("overview"); renderHeader(S.overview);
+    const html = await V[r.tab](r.id);
+    if (html == null) return;
+    const y = key === lastRoute ? window.scrollY : 0;
+    main.innerHTML = html; window.scrollTo(0, y); lastRoute = key;
+  } catch (e) {
+    main.innerHTML = `<div class="err-box"><strong>Could not load:</strong> ${esc(e.message)}<br><span class="small">Is <code>lab web</code> still running?</span></div>`;
+    $("#health").innerHTML = `<span class="pill critical">dashboard server unreachable</span>`;
+  } finally { rendering = false; }
+}
+const refresh = () => render(true);
+window.addEventListener("hashchange", () => render(true));
+$("#refresh").onclick = refresh;
+$("#project").onchange = e => { S.project = e.target.value; render(true); };
+setInterval(() => { if ($("#auto").checked && !document.hidden && !dlg.open) render(false); }, 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && $("#auto").checked) render(false); });
+
+// theme toggle: remembered per browser; falls back to the OS setting
+function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
+try { applyTheme(localStorage.getItem("lab-theme")); } catch (e) {}
+$("#theme").onclick = () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const t = dark ? "light" : "dark"; applyTheme(t); try { localStorage.setItem("lab-theme", t); } catch (e) {}
+};
+
+// hover tooltips for anything with data-tip
+const tip = $("#tip");
+document.addEventListener("mousemove", e => {
+  const el = e.target.closest && e.target.closest("[data-tip]");
+  if (!el) { tip.style.display = "none"; return; }
+  tip.textContent = el.getAttribute("data-tip"); tip.style.display = "block";
+  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8), y = e.clientY + 16 + tip.offsetHeight > innerHeight ? e.clientY - tip.offsetHeight - 10 : e.clientY + 16;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+});
+render(true);
+</script>
+</body>
+</html>

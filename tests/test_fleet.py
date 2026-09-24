@@ -56,7 +56,7 @@ def rp():
 
 @pytest.fixture
 def fleet(db, cfg, project, rp, monkeypatch):
-    async def fake_ssh(key, host, port, cmd, timeout=45):
+    async def fake_ssh(key, host, port, cmd, timeout=45, user="root"):
         if "status.json" in cmd:
             return 0, json.dumps(fake_ssh.status, indent=1)      # labrun writes indented JSON
         return 0, "NVIDIA H100 80GB HBM3\n/dev/sda 200G"
@@ -468,3 +468,202 @@ async def test_shadeform_prices_merge_and_stock(db, fleet, rp, sf):
     assert prices[H100]["COMMUNITY"] == 2.0 and prices[H100]["SHADEFORM"] == 2.5
     assert fleet.stock_of(H100, 1, "SHADEFORM") == "High"
     assert fleet.clouds_for("NVIDIA H200", 1) == ["COMMUNITY", "SECURE"]   # no Shadeform mapping for it here
+
+
+async def test_failed_provisioning_probe_is_recorded_and_shown(db, fleet, rp, sf, monkeypatch):
+    from lab.context import leases_table
+    fleet.cloud_order = ["SHADEFORM"]
+    add_thread(db)
+
+    async def refused(key, host, port, cmd, timeout=45, user="root"):
+        return 255, "root@10.0.0.9: Permission denied (publickey)."
+    monkeypatch.setattr(fleet_mod, "ssh_run", refused)
+    lid = lease(db)
+    await fleet.process_leases()
+    l = L(db, lid)
+    assert l["status"] == "provisioning" and "rc=255" in l["reason"] and "Permission denied" in l["reason"]
+    assert "Permission denied" in leases_table(db, "affine")
+    db.update("leases", "id=?", (lid,), provisioning_at=now() - 61 * 60)
+    await fleet.process_leases()
+    assert "Permission denied" in db.one("SELECT summary FROM events WHERE topic='gpu.lease' ORDER BY id DESC")["summary"]
+
+
+async def test_shadeform_lease_waits_for_bootstrap_and_says_why(db, fleet, rp, sf, monkeypatch):
+    """Lease 11: the VM was up but its startup script still running, and nobody could see why."""
+    fleet.cloud_order = ["SHADEFORM"]
+    add_thread(db)
+    seen: list[tuple[str, str]] = []
+    state = {"root": False, "done": False}
+
+    async def vm(key, host, port, cmd, timeout=45, user="root"):
+        seen.append((user, cmd))
+        if user == "root":
+            if not state["root"]:
+                return 255, "root@10.0.0.9: Permission denied (publickey)."
+            if "lab-bootstrap.done" in cmd and not state["done"]:
+                return 3, "bootstrap still running: + timeout 300 apt-get update -qq"
+            return 0, "NVIDIA H100 80GB HBM3\n/dev/nvme0n1 7T"
+        return 0, "Running apt-get update\nWaiting for cache lock"
+    monkeypatch.setattr(fleet_mod, "ssh_run", vm)
+    lid = lease(db)
+    await fleet.process_leases()
+    sf.pods[L(db, lid)["pod_id"]].raw = {"ssh_user": "shadeform"}
+    await fleet.process_leases()
+    assert ("shadeform", ) == seen[-1][:1] and "init-script" in seen[-1][1]
+    assert "startup script: Running apt-get update | Waiting for cache lock" in L(db, lid)["reason"]
+    state["root"] = True
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "provisioning" and "bootstrap still running" in L(db, lid)["reason"]
+    state["done"] = True
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "granted"
+
+
+# ------------------------------------------------------------ Vast.ai as a third cloud
+class FakeVast:
+    gpu_map = {H100: ("H100 SXM", None)}
+
+    def __init__(self):
+        self.pods: dict[str, Pod] = {}
+        self.calls: list[tuple] = []
+        self.price = 1.5
+        self.boot_status = "RUNNING"
+        self.start_status = "RUNNING"
+        self.pods["vteam"] = Pod("vteam", "someone", "RUNNING", "H100 SXM", 1, 2.5, "7.7.7.7", 22, "m-team", "VAST", {})
+
+    async def gpu_prices(self):
+        return {H100: {"VAST": self.price, "max": {"VAST": 8}}}
+
+    async def stock(self, shapes):
+        return {s: "Low" for s in shapes}
+
+    async def create_pod(self, *, name, gpu_type, gpu_count, cloud, image, container_disk_gb, volume_gb, env, avoid=()):
+        self.calls.append(("create", name, cloud, sorted(avoid)))
+        pid = f"v{len(self.pods)}"
+        self.pods[pid] = Pod(pid, name, self.boot_status, "H100 SXM", gpu_count, self.price * gpu_count, "10.0.0.7",
+                             41022, f"vm{len(self.pods)}", "VAST", {"status_msg": "pulling image"})
+        return self.pods[pid]
+
+    async def get_pod(self, pid):
+        return self.pods.get(pid)
+
+    async def list_pods(self):
+        return list(self.pods.values())
+
+    async def attach_key(self, pid, key):
+        self.calls.append(("attach", pid))
+
+    async def start(self, pid):
+        self.calls.append(("start", pid))
+        self.pods[pid].status = self.start_status
+
+    async def stop(self, pid):
+        self.calls.append(("stop", pid))
+        self.pods[pid].status = "EXITED"
+
+    async def delete(self, pid):
+        self.calls.append(("delete", pid))
+        self.pods[pid].status = "TERMINATED"
+
+
+@pytest.fixture
+def vast(fleet, tmp_path):
+    fleet.vast = FakeVast()
+    fleet.cloud_order = ["COMMUNITY", "SECURE", "VAST"]
+    fleet.ssh_key = tmp_path / "key"
+    (tmp_path / "key.pub").write_text("ssh-ed25519 AAAAlab lab@pic\n")
+    return fleet.vast
+
+
+async def test_vast_cheapest_wins_is_stopped_not_deleted_and_restarted(db, fleet, rp, vast):
+    add_thread(db)
+    lid = lease(db)
+    await fleet.process_leases()                  # Vast $1.50 < Runpod $2.00
+    l = L(db, lid)
+    assert l["status"] == "granted" and l["cloud"] == "VAST" and (l["ssh_host"], l["ssh_port"]) == ("10.0.0.7", 41022)
+    assert ("create", "Pi_affine-01", "VAST", []) in vast.calls and not [c for c in rp.calls if c[0] == "create"]
+    db.update("leases", "id=?", (lid,), status="release_requested", job_status=json.dumps({"stop_now": True}))
+    await fleet.process_leases()
+    assert ("stop", l["pod_id"]) in vast.calls and not [c for c in vast.calls if c[0] == "delete"]
+    vast.start_status = "ERROR"                    # just after a start, Vast still reads "exited"
+    lid2 = lease(db)
+    await fleet.process_leases()                  # its /workspace is kept: the same instance starts again
+    assert L(db, lid2)["pod_id"] == l["pod_id"] and ("start", l["pod_id"]) in vast.calls
+    assert L(db, lid2)["status"] == "provisioning"   # not failed as dead: it is waiting for its host
+    vast.pods[l["pod_id"]].status = "RUNNING"
+    await fleet.process_leases()
+    assert L(db, lid2)["status"] == "granted"
+    await fleet.reconcile()
+    assert not [c for c in vast.calls if c[1:2] == ("vteam",)]
+
+
+async def test_vast_refused_root_gets_the_key_reattached_then_waits_for_onstart(db, fleet, rp, vast, monkeypatch):
+    """The Shadeform lesson: if root ssh is refused, fix it through the provider API, and say so."""
+    fleet.cloud_order = ["VAST"]
+    add_thread(db)
+    state = {"root": False, "done": False}
+    seen = []
+
+    async def box(key, host, port, cmd, timeout=45, user="root"):
+        seen.append(cmd)
+        if not state["root"]:
+            return 255, "root@10.0.0.7: Permission denied (publickey)."
+        if "lab-bootstrap.done" in cmd and not state["done"]:
+            return 3, "bootstrap still running: + apt-get update"
+        return 0, "NVIDIA H100 80GB HBM3\noverlay 280G"
+    monkeypatch.setattr(fleet_mod, "ssh_run", box)
+    lid = lease(db)
+    await fleet.process_leases()
+    pid = L(db, lid)["pod_id"]
+    assert ("attach", pid) in vast.calls and "re-attached" in L(db, lid)["reason"]
+    state["root"] = True
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "provisioning" and "bootstrap still running" in L(db, lid)["reason"]
+    state["done"] = True
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "granted" and "lab-bootstrap.done" in seen[-1]
+
+
+async def test_vast_dead_instance_fails_fast_is_deleted_and_its_host_avoided(db, fleet, rp, vast):
+    fleet.cloud_order = ["VAST"]
+    vast.boot_status = "CREATED"
+    add_thread(db)
+    lid = lease(db)
+    await fleet.process_leases()
+    pid = L(db, lid)["pod_id"]
+    assert "pulling image" in L(db, lid)["reason"]          # Vast's status_msg says what it is doing
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "provisioning"            # within vast_provision_timeout_minutes
+    vast.pods[pid].status, vast.pods[pid].raw = "ERROR", {"status_msg": "Error response from daemon: no GPU"}
+    await fleet.process_leases()
+    l = L(db, lid)
+    assert l["status"] == "failed" and "failed to start" in l["reason"] and "no GPU" in l["reason"]
+    assert ("delete", pid) in vast.calls                     # never came up, so nothing to keep
+    vast.boot_status = "RUNNING"
+    lid2 = lease(db)
+    await fleet.process_leases()
+    assert vast.calls[-1][0] == "create" and vast.calls[-1][3] == [vast.pods[pid].machine_id]
+    assert L(db, lid2)["status"] == "granted"
+
+
+async def test_vast_stopped_instance_on_blacklisted_host_is_not_restarted(db, fleet, rp, vast):
+    fleet.cloud_order = ["VAST"]
+    add_thread(db)
+    lid = lease(db)
+    await fleet.process_leases()
+    pid = L(db, lid)["pod_id"]
+    db.update("leases", "id=?", (lid,), status="release_requested", job_status=json.dumps({"stop_now": True}))
+    await fleet.process_leases()
+    db.kv_set("affine", "machine_blacklist", [vast.pods[pid].machine_id])
+    lid2 = lease(db)
+    await fleet.process_leases()
+    assert L(db, lid2)["pod_id"] != pid and ("start", pid) not in vast.calls
+
+
+async def test_vast_prices_merge_and_clouds(db, fleet, rp, vast):
+    fleet.stock_watch = {"types": [H100], "counts": [1]}
+    await fleet.refresh_stock(force=True)
+    assert db.kv_get("affine", "gpu_prices")[H100]["VAST"] == 1.5 and fleet.stock_of(H100, 1, "VAST") == "Low"
+    assert fleet.clouds_for("NVIDIA H200", 1) == ["COMMUNITY", "SECURE"]
+    fleet.vast = None                              # no key: VAST in cloud_order is simply skipped
+    assert fleet.clouds_for(H100, 1) == ["COMMUNITY", "SECURE"]

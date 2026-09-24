@@ -1,7 +1,7 @@
 # The lab — notes for Claude sessions that change it
 
 This repo is a live, always-on system. `labd` (systemd user service) is running from this working
-tree right now: it wakes Claude agents, rents Runpod (and Shadeform) GPUs against a real budget, and posts to Discord.
+tree right now: it wakes Claude agents, rents Runpod (and Shadeform, Vast.ai) GPUs against a real budget, and posts to Discord.
 Read `README.md` first for the design; this file is how to change it safely.
 
 ## Layout
@@ -11,6 +11,8 @@ Read `README.md` first for the design; this file is how to change it safely.
   `db.py` (SQLite schema + `MIGRATIONS`), `config.py` (`DEFAULT_ROLES`, models, config parsing).
 - `bin/` — `lab`, `labd`, `lab-guard` (PreToolUse hook for every agent), `labrun` (job wrapper on pods).
 - `lab.toml` — global config. `projects/<name>/project.toml`, `plugin.py`, `prompts/*.md`, `GOAL.md`.
+  `projects/<name>/CLAUDE.md` = operators' rules for that project (Claude Code loads it for every agent under
+  the folder; read-only for agents, approval-gated for `maint:`).
 - `projects/*/work/` and `projects/*/world/` — the agents' research notes and World State. labd commits
   them automatically after agent runs (`[affine] …` commits). Don't edit or reformat them.
 - State: `~/.local/state/lab/lab.db` (events, runs, threads, leases, ledger, outbox, kv). Secrets:
@@ -18,7 +20,7 @@ Read `README.md` first for the design; this file is how to change it safely.
 
 ## Change, test, deploy
 1. Make the change; match the surrounding style (short docstrings on the "why", no ceremony).
-2. `uv run pytest -q` must pass (fast, offline: fake `claude`, fake Discord, fake Runpod/Shadeform). Add a test for
+2. `uv run pytest -q` must pass (fast, offline: fake `claude`, fake Discord, fake Runpod/Shadeform/Vast). Add a test for
    new behaviour. New DB columns go in `DB.MIGRATIONS`, never only in `SCHEMA`.
 3. Commit on master with a plain message (local identity "lab" is fine). The research agents commit
    `projects/*/work|world` concurrently — only `git add` the files you changed.
@@ -32,11 +34,11 @@ Read `README.md` first for the design; this file is how to change it safely.
 6. Prompt-only changes (`projects/*/prompts/*.md`) apply on the next agent run; no restart needed.
 
 ## Rules that must not be broken
-- GPUs: `lab gpu pause/resume` is a human decision. The Runpod and Shadeform accounts are shared — the lab only
+- GPUs: `lab gpu pause/resume` is a human decision. The Runpod, Shadeform and Vast accounts are shared — the lab only
   touches pods in its own `pods` table (`Pi_affine-NN`); stop, don't terminate, unless asked. Shadeform VMs
   cannot be stopped, so for them "stop" means delete (`Fleet.stop_pod`).
-- Budget: `daily_usd` is the only spending limit and is enforced in code; `test_mode` limits each lease to
-  1× H100. Changing either is the operator's call, not yours.
+- Budget: `daily_usd` is the only spending limit and is enforced in code; `test_mode` (off since
+  2026-09-24) limits each lease to 1× H100. Changing either is the operator's call, not yours.
 - Agents must never get credentials: keep `SECRET_ENV` stripping, the `--settings` deny list and
   `bin/lab-guard` intact (it is a seatbelt, not isolation — agents run as the same Unix user).
 - Nothing is pushed to `~/Work/affine` remotes (AffineFoundation/affine is public). Submitting to the

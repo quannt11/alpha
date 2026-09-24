@@ -39,6 +39,7 @@ def labdir(tmp_path, monkeypatch):
     shutil.copy(src / "plugin.py", pdir / "plugin.py")
     shutil.copytree(src / "prompts", pdir / "prompts")
     shutil.copy(src / "GOAL.md", pdir / "GOAL.md")
+    shutil.copy(src / "CLAUDE.md", pdir / "CLAUDE.md")
     (tmp_path / "code").mkdir()
     monkeypatch.setenv("LAB_CONFIG", str(tmp_path / "lab.toml"))
     for var in ("LAB_PROJECT", "LAB_ROLE", "LAB_RUN_ID", "LAB_THREAD"):   # tests also run inside agent sessions

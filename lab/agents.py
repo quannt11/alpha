@@ -32,7 +32,7 @@ STATE_LIMIT = 30000   # STATE.md is ~26k chars; cutting it at 8k hid everything 
 KEYED_ROLES = {"concierge", "thread", "maintainer"}
 RATE_RE = re.compile(r"rate.?limit|usage limit|too many requests|\b429\b|overloaded|limit reached|"
                      r"resets? at|quota|out of (extra )?usage", re.I)
-SECRET_ENV = ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "SHADEFORM_API_KEY", "DISCORD_BOT_TOKEN_ARBOS_BITTENSOR")
+SECRET_ENV = ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "SHADEFORM_API_KEY", "VAST_API_KEY", "DISCORD_BOT_TOKEN_ARBOS_BITTENSOR")
 
 READONLY_TOOLS = [
     "Read", "Grep", "Glob", "WebFetch", "WebSearch",

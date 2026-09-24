@@ -1,7 +1,7 @@
 name = "affine"
-# Test mode applies [fleet.test_policy] (currently: one H100 per experiment). Set to false to run
-# for real: then the only limit is budget.daily_usd.
-test_mode = true
+# Test mode applies [fleet.test_policy] (one H100 per experiment). Off since 2026-09-24 (operator, m-2):
+# real runs, the only limit is budget.daily_usd. Set to true to bring the policy back.
+test_mode = false
 root = "~/Work/affine"             # first-level project folder (all repos under it)
 pod_prefix = "Pi_affine"           # pods are Pi_affine-01..N; Pi_affine stays the human dev box
 
@@ -28,20 +28,22 @@ stall_minutes = 30
 check_hours = 2
 provision_timeout_minutes = 25
 shadeform_provision_timeout_minutes = 60   # Shadeform VMs boot in 5–45 min depending on the cloud
+vast_provision_timeout_minutes = 40        # Vast hosts pull the image themselves (slow links take a while)
 capacity_retry_minutes = 10        # out-of-stock leases stay queued and retry…
 capacity_wait_hours = 6            # …for this long before failing
 stock_refresh_minutes = 5          # Runpod stock feed (`lab gpu stock`)
 # Shapes always watched; experiments' own types/alternatives are added automatically.
 stock_watch = { types = ["NVIDIA H100 80GB HBM3", "NVIDIA H200", "NVIDIA A100-SXM4-80GB", "NVIDIA B200", "NVIDIA H100 NVL"], counts = [1, 2, 4, 8] }
 # Where leases may rent; the cheapest offer wins. SHADEFORM = Shadeform VMs (needs SHADEFORM_API_KEY):
-# they cannot stop, so they are deleted on release/idle, /workspace included.
-cloud_order = ["COMMUNITY", "SECURE", "SHADEFORM"]
+# they cannot stop, so they are deleted on release/idle, /workspace included. VAST = Vast.ai marketplace
+# containers (needs VAST_API_KEY): they stop and start like Runpod pods; host filters are in lab.toml [vast].
+cloud_order = ["COMMUNITY", "SECURE", "SHADEFORM", "VAST"]
 container_disk_gb = 80
 volume_gb = 200
 # Used only if the Runpod price API is unreachable ($/GPU/h).
 price_hints = { "NVIDIA H100 80GB HBM3" = 2.99, "NVIDIA H200" = 3.99, "NVIDIA A100-SXM4-80GB" = 1.89, "NVIDIA RTX A4000" = 0.25 }
 
-[fleet.test_policy]                # only while test_mode = true (operator, 2026-09-23)
+[fleet.test_policy]                # only while test_mode = true (inactive since 2026-09-24)
 max_gpus_per_experiment = 1
 allowed_gpu_types = ["NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe", "NVIDIA H100 NVL"]
 

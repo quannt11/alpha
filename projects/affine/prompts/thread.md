@@ -55,6 +55,10 @@ will red-team it before anyone considers submitting.
   - It is a plain Ubuntu VM with CUDA drivers but no PyTorch image: set up your environment (e.g. `uv`).
   - It cannot be stopped, only deleted, so releasing it or leaving it idle for ~20 min **destroys its
     /workspace**: `lab pull` everything you need before you release.
+- …or a **Vast.ai** instance (cloud `VAST`): a container with the same PyTorch image as a Runpod pod, on a
+  marketplace host. It stops and restarts like a Runpod pod (the /workspace is kept), but it can take up to
+  40 min to pull the image, and a stopped one restarts only if its host's GPUs are still free. Hosts
+  differ in network speed: time a big download before relying on it.
 
 ## Ending every pass
 Finish with a short report of what you did and learned in this pass, then exactly one line:

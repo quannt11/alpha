@@ -29,6 +29,7 @@ from .fleet import Fleet
 from .maint import Maint
 from .runpod import Runpod
 from .shadeform import Shadeform
+from .vast import Vast
 from .sentinel import Sentinel, load_plugin
 
 log = logging.getLogger("labd")
@@ -62,6 +63,7 @@ class Daemon:
         self.runpod = Runpod(self.secrets["RUNPOD_API_KEY"]) if self.secrets.get("RUNPOD_API_KEY") else None
         self.shadeform = (Shadeform(self.secrets["SHADEFORM_API_KEY"], gpu_map=cfg.shadeform.get("gpu_map"))
                           if self.secrets.get("SHADEFORM_API_KEY") else None)
+        self.vast = Vast(self.secrets["VAST_API_KEY"], cfg=cfg.vast) if self.secrets.get("VAST_API_KEY") else None
         self.sentinels: dict[str, Sentinel] = {}
         self.fleets: dict[str, Fleet] = {}
         self.agents = Agents(self.db, cfg, on_result=self.on_result)
@@ -73,7 +75,7 @@ class Daemon:
             if plugin_path.exists():
                 self.sentinels[p.name] = Sentinel(self.db, p, load_plugin(plugin_path))
             self.fleets[p.name] = Fleet(self.db, cfg, p, self.runpod, notify=self._notifier(p),
-                                        shadeform=self.shadeform)
+                                        shadeform=self.shadeform, vast=self.vast)
             for d in (p.world_dir, p.work_dir):
                 d.mkdir(parents=True, exist_ok=True)
 
@@ -390,10 +392,10 @@ class Daemon:
             tasks.append(asyncio.create_task(self.gateway.run()))
         for p in self.cfg.projects.values():
             self.db.emit(p.name, "labd.started", f"labd started (discord={'on' if self.discord else 'off'}, "
-                         f"runpod={'on' if self.runpod else 'off'}, shadeform={'on' if self.shadeform else 'off'})",
+                         f"runpod={'on' if self.runpod else 'off'}, shadeform={'on' if self.shadeform else 'off'}, vast={'on' if self.vast else 'off'})",
                          severity="info")
-        log.info("labd running: projects=%s discord=%s runpod=%s shadeform=%s", list(self.cfg.projects),
-                 bool(self.discord), bool(self.runpod), bool(self.shadeform))
+        log.info("labd running: projects=%s discord=%s runpod=%s shadeform=%s vast=%s", list(self.cfg.projects),
+                 bool(self.discord), bool(self.runpod), bool(self.shadeform), bool(self.vast))
         await self.stop.wait()
         log.info("labd stopping")
         if self.gateway:

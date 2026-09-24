@@ -1,0 +1,15 @@
+[Unit]
+Description=lab dashboard (read-mostly web UI on 127.0.0.1:8765)
+After=labd.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Work/lab
+ExecStart=%h/Work/lab/bin/lab web
+Restart=always
+RestartSec=5
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

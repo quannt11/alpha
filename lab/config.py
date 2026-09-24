@@ -90,6 +90,7 @@ class LabConfig:
     claude_bin: str
     runpod: dict
     shadeform: dict                 # optional [shadeform] gpu_map = {"<Runpod GPU id>" = ["H100", "sxm5"]}
+    vast: dict                      # optional [vast]: host filters, image, gpu_map = {"<Runpod GPU id>" = ["H100 SXM", 0]}
     projects: dict[str, Project]
     maint: MaintConfig
 
@@ -200,6 +201,7 @@ def load(path: str | Path | None = None) -> LabConfig:
         claude_bin=raw.get("claude", {}).get("bin", "claude"),
         runpod=raw.get("runpod", {}),
         shadeform=raw.get("shadeform", {}),
+        vast=raw.get("vast", {}),
         projects=projects,
         maint=MaintConfig(
             operators=[str(x) for x in maint.get("operators", [])],
@@ -228,7 +230,7 @@ def load_secrets(cfg: LabConfig) -> dict[str, str]:
             v = v.strip().strip('"').strip("'")
             if v and k not in out:
                 out[k] = v
-    for k in ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "SHADEFORM_API_KEY"):
+    for k in ("DISCORD_BOT_TOKEN", "RUNPOD_API_KEY", "SHADEFORM_API_KEY", "VAST_API_KEY"):
         if os.environ.get(k):
             out[k] = os.environ[k]
     return out
