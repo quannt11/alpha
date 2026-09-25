@@ -94,6 +94,22 @@ def test_gpu_lease_by_thread_with_test_policy(labdir, cfg, thread):
     assert db.one("SELECT status FROM leases")["status"] == "denied"    # a requested lease is cancelled
 
 
+def test_gpu_release_stop_reaches_a_pod_already_released(labdir, cfg, thread):
+    """m-6: `release` then `release --stop` left an 8×H200 VM idle 20 min: the second call matched no lease."""
+    db = DB(cfg.db_path)
+    lid = db.insert("leases", project="affine", holder="t-001", experiment_id="t-001", status="released",
+                    gpu_type=H100, gpu_count=1, max_hours=2, pod_id="vm1", pool="research")
+    db.insert("pods", id="vm1", project="affine", name="Pi_affine-01", cloud="SHADEFORM", state="RUNNING",
+              last_experiment="t-001")
+    with pytest.raises(SystemExit):                                     # plain release: nothing to do, says so
+        run("gpu", "release")
+    run("gpu", "release", "--lease", str(lid), "--stop")
+    assert db.one("SELECT stop_requested FROM pods WHERE id='vm1'")["stop_requested"] == 1
+    db.update("pods", "id='vm1'", (), stop_requested=0, lease_id=99)   # re-leased: not ours to stop any more
+    with pytest.raises(SystemExit):
+        run("gpu", "release", "--stop")
+
+
 def test_gpu_lease_without_test_mode_takes_any_shape(labdir, cfg, thread):
     """affine runs for real since m-2 (2026-09-24): only the budget limits a lease."""
     run("gpu", "lease", "--gpu", "NVIDIA H200", "--count", "4", "--hours", "2")
@@ -231,3 +247,10 @@ def test_maint_is_lab_wide_but_a_request_needs_a_project(labdir, two_projects, c
     with pytest.raises(SystemExit):
         run("maint", "request", "change X")
     assert "which project" in capsys.readouterr().err
+
+
+def test_project_may_follow_the_subcommand():
+    p = cli.build_parser()
+    assert p.parse_args(["researcher", "show", "--project", "albedo"]).project == "albedo"
+    assert p.parse_args(["--project", "affine", "researcher", "show"]).project == "affine"
+    assert p.parse_args(["researcher", "show"]).project is None

@@ -116,6 +116,10 @@ dialog .dbody { padding: 16px; }
 .chat .msg { padding: 6px 0; border-bottom: 1px solid var(--border); }
 .chat .who { font-weight: 600; font-size: 12px; }
 .chat .bot .who { color: var(--accent); }
+.convo { max-height: 72vh; overflow: auto; }
+.convo .msg { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.convo .msg.user { background: var(--surface-2); margin: 0 -16px; padding: 8px 16px; }
+.convo .msg.tool { padding: 1px 0; border: 0; color: var(--ink-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread-card { cursor: pointer; } .thread-card:hover { border-color: var(--ink-3); }
 .err-box { background: var(--critical-bg); padding: 10px; border-radius: 8px; }
 @media (max-width: 640px) { .cols-2 { grid-template-columns: 1fr; } main { padding: 12px 16px; } .kpi .value { font-size: 18px; } }
@@ -142,7 +146,7 @@ dialog .dbody { padding: 16px; }
 
 <script>
 "use strict";
-const TABS = [["overview", "Overview"], ["threads", "Threads"], ["gpus", "GPUs & spend"], ["runs", "Agent runs"],
+const TABS = [["overview", "Overview"], ["threads", "Threads"], ["researcher", "Researcher"], ["gpus", "GPUs & spend"], ["runs", "Agent runs"],
               ["events", "Events"], ["discord", "Discord"], ["inbox", "Inbox"], ["world", "World"]];
 const S = { project: null, tz: undefined, overview: null, filters: { runs: {}, events: { hide_agent: "1" } },
             extra: { runs: [], events: [] }, sub: {}, open: new Set() };
@@ -167,7 +171,7 @@ function when(ts) {
 const dur = (a, b) => { if (!a) return "—"; const s = (b || Date.now() / 1000) - a; return s < 90 ? Math.round(s) + "s" : s < 5400 ? Math.round(s / 60) + "m" : (s / 3600).toFixed(1) + "h"; };
 const tsCell = ts => `<span data-tip="${esc(when(ts))}">${esc(ago(ts))}</span>`;
 function statusPill(s) {
-  const m = { ok: "good", running: "info", queued: "", granted: "good", active: "good", sent: "good", deployed: "good", accepted: "good", ready: "good", assigned: "info", done: "good", closed: "",
+  const m = { ok: "good", running: "info", chat: "info", queued: "", granted: "good", active: "good", sent: "good", deployed: "good", accepted: "good", ready: "good", assigned: "info", done: "good", closed: "",
               error: "critical", timeout: "critical", failed: "critical", rolled_back: "critical", denied: "warning", ratelimited: "warning",
               provisioning: "info", requested: "info", awaiting_approval: "warning", pending: "info", unknown: "warning", open: "warning",
               proposed: "info", retired: "", released: "", rejected: "", major: "critical", normal: "warning", minor: "info", info: "" };
@@ -440,6 +444,46 @@ async function threadDetail(id) {
     </div>`;
 }
 
+V.researcher = async () => {
+  const d = await api("researcher"), s = d.session, box = document.getElementById("rs-convo");
+  const stick = !box || box.scrollTop + box.clientHeight >= box.scrollHeight - 40;   // keep following the end
+  S.rsLive = !!(d.run || d.chat);
+  const state = d.chat ? `<span class="pill warning">live chat: ${esc(d.chat.by)}</span> <span class="small muted">since ${esc(ago(d.chat.since))}; its wakes wait</span>`
+    : d.run ? `${statusPill(d.run.status)} <span class="small muted">run ${d.run.id}${d.run.started_at ? " · working for " + esc(dur(d.run.started_at)) : ""}</span>`
+    : `<span class="pill">idle</span>`;
+  const item = e => {
+    const t = e.ts ? `<span class="small muted">${tsCell(Date.parse(e.ts) / 1000)}</span>` : "";
+    if (e.who === "tool") return `<div class="msg tool mono" title="${esc(e.text)}">↳ ${esc(e.text)}</div>`;
+    if (e.who === "researcher") return `<div class="msg"><div class="row"><span class="who" style="color:var(--accent)">Researcher</span>${t}</div><div class="md">${md(e.text)}</div></div>`;
+    const long = e.text.length > 700, k = "rs" + esc(e.ts || "");
+    return `<div class="msg user"><div class="row"><span class="who">${long ? "labd (wake)" : "you / labd"}</span>${t}</div>${long
+      ? `<details ${S.open.has(k) ? "open" : ""} data-k="${k}"><summary class="clip">${esc(e.text.slice(0, 200))}</summary><div class="md-box">${md(e.text)}</div></details>`
+      : `<div class="md">${md(e.text)}</div>`}</div>`;
+  };
+  const runs = d.runs.map(r => `<tr class="click" onclick="openRun(${r.id})"><td>${r.id}</td><td>${statusPill(r.status)}</td><td class="small">${r.key === "chat" ? "live chat" : "wake"}</td>
+      <td>${tsCell(r.started_at)}</td><td class="num">${dur(r.started_at, r.ended_at)}</td><td class="num">${money(r.cost_usd)}</td></tr>`).join("");
+  if (stick) setTimeout(() => { const b = document.getElementById("rs-convo"); if (b) b.scrollTop = b.scrollHeight; }, 0);
+  return `<h1>Researcher ${state}</h1>
+    <div class="grid kpis" style="margin-bottom:16px">
+      <div class="card kpi"><div class="label">Session</div><div class="value">#${s.gen}</div><div class="note mono">${esc((s.id || "starts on the next wake").slice(0, 8))}</div></div>
+      <div class="card kpi"><div class="label">Context</div><div class="value">${s.ctx ? Math.round(s.ctx / 1000) + "k" : "—"}</div><div class="note">${s.rotate ? "rotates after its next wake" : "rotates at " + Math.round(d.rotate_tokens / 1000) + "k"}</div></div>
+      <div class="card kpi"><div class="label">Wakes in this session</div><div class="value">${s.passes}</div><div class="note">session cost ${money(s.cost)}</div></div>
+    </div>
+    ${d.enabled ? `<div class="card" style="margin-bottom:16px"><h2>Talk to the Researcher</h2>
+      <textarea id="say-researcher" class="draft" placeholder="A question or guidance. It wakes the Researcher in its own session right away; the reply appears below."></textarea>
+      <div class="row" style="margin-top:6px"><button class="primary" onclick="sayResearcher()">Send</button>
+        <span class="small muted">Full interactive session: <code>lab researcher chat</code> in a terminal (same conversation).</span></div></div>`
+      : `<div class="alert info" style="margin-bottom:16px"><span class="ico">●</span><div>The ${esc(S.project || "")} Researcher is off (watch mode).</div></div>`}
+    <div class="card"><h2>Conversation <span class="sub">its one session, live · tool output left out</span></h2>
+      <div class="convo" id="rs-convo">${d.transcript.map(item).join("") || `<p class="muted">No session yet.</p>`}</div></div>
+    <div class="card" style="margin-top:16px"><h2>Wakes and chats</h2><div class="scroll"><table><tr><th>#</th><th></th><th>What</th><th>When</th><th class="num">Took</th><th class="num">Cost</th></tr>${runs}</table></div></div>`;
+};
+async function sayResearcher() {
+  const text = draftVal("say-researcher");
+  if (!text) return toast("Write a message first.", false);
+  if (await act({ action: "researcher_say", text })) { clearDraft("say-researcher"); S.rsLive = true; }
+}
+
 V.gpus = async () => {
   const d = await api("gpus");
   const filt = S.filters.stock || "";
@@ -621,6 +665,8 @@ window.addEventListener("hashchange", () => render(true));
 $("#refresh").onclick = refresh;
 $("#project").onchange = e => { S.project = e.target.value; render(true); };
 setInterval(() => { if ($("#auto").checked && !document.hidden && !dlg.open) render(false); }, 15000);
+// the Researcher's conversation is followed live while it is thinking or someone is chatting with it
+setInterval(() => { if (S.rsLive && route().tab === "researcher" && $("#auto").checked && !document.hidden && !dlg.open) render(false); }, 4000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && $("#auto").checked) render(false); });
 
 // theme toggle: remembered per browser; falls back to the OS setting

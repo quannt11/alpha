@@ -122,10 +122,12 @@ DEFAULT_ROLES: dict[str, dict] = {
     "scout":     {"model": SONNET, "toolset": CORE_TOOLS, "priority": 20, "timeout_s": 1200, "debounce_s": 60,
                   "wake_on": ["world.change"], "min_severity": "normal"},
     # the research mind: analyses where we stand, reads papers, writes ideas that labd hands to threads,
-    # answers the threads' questions and reads their reports. Its context is about ideas only.
+    # answers the threads' questions and reads their reports. Its context is about ideas only. One session
+    # across wakes (rotated like a thread's), so operators can talk to it live (`lab researcher chat|say`).
     "researcher": {"model": FABLE, "toolset": CORE_TOOLS, "priority": 25, "timeout_s": 3600, "debounce_s": 90,
-                   "wake_on": ["thread.report", "thread.question", "research.suggestion", "research.directive", "world.brief",
-                               "board.king", "thread.claim.verdict", "tick.research"], "min_severity": "normal"},
+                   "wake_on": ["thread.report", "thread.question", "research.suggestion", "research.directive",
+                               "research.operator", "world.brief", "board.king", "thread.claim.verdict", "tick.research"],
+                   "min_severity": "normal"},
     # an implementor: takes one task at a time, rents its GPUs, implements, evaluates, reports back;
     # consults Fable in-loop (the advisor strategy) at decisions it can't reasonably make alone
     "thread":    {"model": OPUS, "toolset": CORE_TOOLS, "effort": "medium", "advisor": FABLE, "priority": 30, "timeout_s": 5400,

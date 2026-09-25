@@ -289,11 +289,14 @@ def status_text(db: DB, cfg, project) -> str:
     agents = ", ".join(f"{r['role']}{'/' + r['key'] if r['key'] else ''} ({ago(r['started_at'])})" for r in running) or "idle"
     paused = db.kv_get(project.name, "gpu_paused")
     changes = maint_in_flight(db)
+    from .research import chat_holder      # (research imports this module)
+    chat = chat_holder(db, project)
     return "\n".join([
         f"# {project.name} — status at {iso(now())}"
         + (f"   ** GPUs PAUSED by operator since {iso(paused['at'])} **" if paused else ""),
         f"budget today: spent ${b['spent_today']:.2f}, reserved ${b['reserved']:.2f} of ${b['daily_cap']:.0f} ({pools})",
-        f"agents running: {agents}; queued {queued}" + (f"; rate-limit backoff until {iso(backoff)}" if backoff > now() else ""),
+        f"agents running: {agents}; queued {queued}" + (f"; rate-limit backoff until {iso(backoff)}" if backoff > now() else "")
+        + (f"; the Researcher is in a live chat with {chat['by']} (since {iso(chat['since'])}; its wakes wait)" if chat else ""),
         "", "## World", world_now(db, project),
         "", "## Research threads", threads_table(db, project.name),
         "", "## GPU leases", leases_table(db, project.name),

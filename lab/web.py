@@ -1,7 +1,7 @@
 """`lab web` — a local dashboard for operators: what the lab is doing, what it costs, what needs a human.
 
-Reads lab.db read-only. The few actions it offers (pause GPUs, message a thread, approve a lab change, …)
-run the `lab` CLI as a human would, so they take exactly the CLI's paths and checks. It binds to
+Reads lab.db read-only. The few actions it offers (pause GPUs, message a thread or the Researcher, approve a
+lab change, …) run the `lab` CLI as a human would, so they take exactly the CLI's paths and checks. It binds to
 127.0.0.1 and holds no credentials; reach it from elsewhere with an SSH tunnel.
 """
 from __future__ import annotations
@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from . import config as config_mod
+from . import research
 from .budget import ACTIVE_LEASE, Budget
 from .context import MAINT_IN_FLIGHT, live_world_version, state_version, world_facts, world_lag
 from .db import DB, now
@@ -256,6 +257,25 @@ class Dash:
                                  (tid,))["c"],
         }
 
+    # ---------------------------------------------------------------- the Researcher (live)
+
+    def researcher(self) -> dict:
+        """The Researcher's one session as it happens: its transcript, whether it is mid-pass, and who is
+        talking to it (lab/research.py)."""
+        db, p = self.db, self.p
+        s = research.session(db, p)
+        wd = p.work_dir / "researcher"
+        return {
+            "session": s, "rotate_tokens": p.rotate_context_tokens, "enabled": bool(p.roles["researcher"].wake_on),
+            "chat": research.chat_holder(db, p),
+            "run": dict(r) if (r := db.one("SELECT id, status, model, queued_at, started_at FROM agent_runs WHERE "
+                                           "project=? AND role='researcher' AND status IN ('running','queued') "
+                                           "ORDER BY status='running' DESC, id", (p.name,))) else None,
+            "transcript": research.transcript(research.session_path(wd, s["id"]), 120),
+            "runs": rows(db.all("SELECT id, key, status, model, started_at, ended_at, cost_usd FROM agent_runs WHERE "
+                                "project=? AND role='researcher' ORDER BY id DESC LIMIT 12", (p.name,))),
+        }
+
     # ---------------------------------------------------------------- GPUs and money
 
     def gpus(self) -> dict:
@@ -475,6 +495,8 @@ def action_argv(body: dict) -> list[str]:
             ["--note", n] if (n := _text(body, "note", required=False)) else [])
     if a == "ticket_close":
         return ["ticket", "close", _need(body, "id", re.compile(r"^\d+$")), "--text", _text(body)]
+    if a == "researcher_say":
+        return ["researcher", "say", "--text", _text(body), "--author", WEB_AUTHOR]
     if a == "daily_report":
         return ["emit", "tick.daily_report", "requested from the dashboard"]
     raise ValueError(f"unknown action {a!r}")
@@ -554,6 +576,8 @@ class Handler(BaseHTTPRequestHandler):
                 data = d.inbox()
             elif view == "world":
                 data = d.world()
+            elif view == "researcher":
+                data = d.researcher()
             else:
                 return self._json(404, {"error": "unknown view"})
             self._json(200, data)

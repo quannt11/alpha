@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS pods (
   id TEXT PRIMARY KEY, project TEXT, name TEXT, gpu_type TEXT, gpu_count INTEGER,
   cloud TEXT, price_hr REAL, created_at REAL, state TEXT, last_seen REAL,
   lease_id INTEGER, idle_since REAL, machine_id TEXT, terminated INTEGER DEFAULT 0,
-  last_billed_at REAL, last_pool TEXT, last_experiment TEXT, ssh_host TEXT, ssh_port INTEGER
+  last_billed_at REAL, last_pool TEXT, last_experiment TEXT, ssh_host TEXT, ssh_port INTEGER,
+  stop_requested INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS ledger (
@@ -166,6 +167,7 @@ class DB:
         ("backlog", "for_thread", "TEXT"), ("backlog", "assigned_at", "REAL"), ("backlog", "done_at", "REAL"),
         ("backlog", "result", "TEXT"), ("backlog", "source_message", "TEXT"),
         ("threads", "task_id", "INTEGER"), ("threads", "idle_since", "REAL"),
+        ("pods", "stop_requested", "INTEGER DEFAULT 0"),
     ]
 
     def _migrate(self) -> None:

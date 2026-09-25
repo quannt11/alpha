@@ -424,6 +424,31 @@ async def test_cheapest_offer_wins_and_shadeform_is_deleted_not_stopped(db, flee
     assert not [c for c in sf.calls if c[0] == "delete" and c[1] == "sfteam"]
 
 
+async def test_failed_or_late_stop_is_retried(db, fleet, rp, sf):
+    """m-6: a stop that fails at release, or `release --stop` after a plain release, is carried out by labd."""
+    fleet.cloud_order = ["SHADEFORM"]
+    add_thread(db)
+    lid = lease(db)
+    await fleet.process_leases()
+    pid = L(db, lid)["pod_id"]
+    real_delete = sf.delete
+
+    async def broken(p):
+        raise RunpodError("502 bad gateway", 502)
+    sf.delete = broken
+    db.update("leases", "id=?", (lid,), status="release_requested", job_status=json.dumps({"stop_now": True}))
+    await fleet.process_leases()
+    assert L(db, lid)["status"] == "released"
+    assert db.one("SELECT * FROM pods WHERE id=?", (pid,))["stop_requested"] == 1
+    await fleet.process_leases()
+    assert topics(db).count("fleet.stop_failed") == 1          # reported once, retried every loop
+    sf.delete = real_delete
+    await fleet.process_leases()
+    row = db.one("SELECT * FROM pods WHERE id=?", (pid,))
+    assert ("delete", pid) in sf.calls and row["terminated"] == 1 and row["stop_requested"] == 0
+    assert "fleet.stopped" in topics(db)
+
+
 async def test_slow_shadeform_boot_is_waited_for(db, fleet, rp, sf):
     fleet.cloud_order = ["SHADEFORM"]
     sf.boot_status = "CREATED"

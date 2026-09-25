@@ -2,7 +2,8 @@
 
 Each role is a fresh `claude -p` process per wake (the Ralph pattern from
 affine/ralphs/ralph.sh: no memory between passes except the working directory
-and the lab's registries); implementor threads resume their own session. The dispatcher turns new events into queued runs;
+and the lab's registries); implementor threads and the Researcher resume their own
+session. The dispatcher turns new events into queued runs;
 the launcher starts them by priority under a global concurrency cap and backs
 off everything when the subscription reports a usage/rate limit.
 """
@@ -23,6 +24,7 @@ from .context import (activity_digest, backlog_table, file_ref, iso, leases_tabl
                       results_table, state_head, status_text, threads_table, world_now)
 from .db import DB, now, topic_match
 from .maint import Maint
+from . import research
 
 log = logging.getLogger("lab.agents")
 
@@ -95,6 +97,12 @@ starts you in a fresh session. Do this wake's work as usual; then, before your r
 - dead ends not to retry, and why; open questions and anything you promised people;
 - key paths, branches and commits.
 Keep it under ~10,000 characters; details belong in NOTES.md. Then end with your NEXT line as usual."""
+
+RESEARCHER_HANDOVER_ASK = """## This is the last pass of this session
+Your conversation is {k}k tokens long. After this wake the lab starts you in a fresh session that remembers
+nothing but your files. Do this wake's work; then make sure RESEARCH.md holds everything the next you needs:
+what you are waiting for from which thread, what you promised people, and what operators told you in live
+chats that should outlast this session (standing guidance belongs under Directives, with who and when)."""
 
 
 def context_tokens(res: dict) -> int | None:
@@ -170,12 +178,15 @@ class Agents:
         _, evs = self._matching(p, role, cur)
         if not evs:
             return
+        # an operator talking to the Researcher is waiting for the answer: no debounce, no waiting for the Scout
+        live = any(e["topic"] == "research.operator" for e in evs)
         # debounce: wait until the burst has been quiet for debounce_s
-        if role.debounce_s and now() - evs[-1]["ts"] < role.debounce_s:
+        if role.debounce_s and not live and now() - evs[-1]["ts"] < role.debounce_s:
             return
         # the Researcher reasons on World State: let a pending Scout update land first (bounded, so a stuck
         # Scout cannot hold up the threads' questions)
-        if role.name == "researcher" and now() - evs[0]["ts"] < RESEARCHER_WAITS_FOR_SCOUT_S and self._scout_pending(p):
+        if role.name == "researcher" and not live and now() - evs[0]["ts"] < RESEARCHER_WAITS_FOR_SCOUT_S \
+                and self._scout_pending(p):
             return
         self._queue(p, role, key, evs)
 
@@ -263,6 +274,9 @@ class Agents:
                 self.db.update("agent_runs", "id=?", (r["id"],), status="error", error="unknown project or role")
                 continue
             if hold and r["role"] != "concierge":
+                continue
+            # an operator is in the Researcher's session (`lab researcher chat`): its wakes wait for them
+            if r["role"] == "researcher" and research.chat_holder(self.db, self.cfg.projects[r["project"]]):
                 continue
             pool = self.slot_pool(r["project"], r["role"])
             if in_use.get(pool, 0) >= self.slot_limit(pool[1]):
@@ -353,6 +367,15 @@ class Agents:
         elif role.name == "thread":
             head += self._thread_context(p, key, evs)
         elif role.name == "researcher":
+            said = [e for e in evs if e["topic"] == "research.operator"]
+            if said:
+                head += ["", "## An operator is talking to you (the lab dashboard or `lab researcher say`)",
+                         "Answer them in your final message: it is shown to them as your reply. Act on "
+                         "what they ask as you would on a directive, and say what you changed."]
+                for e in said:
+                    m = json.loads(e["payload"] or "{}")
+                    head += [f"**{m.get('author') or 'operator'}** ({iso(e['ts'])}):",
+                             "> " + (m.get("text") or "").replace("\n", "\n> ")]
             done = db.all("SELECT * FROM backlog WHERE project=? AND status IN ('done','rejected') "
                           "ORDER BY COALESCE(done_at, created_at) DESC LIMIT 8", (name,))
             head += ["", "## The shared research memory (yours to keep; every thread reads it)",
@@ -368,6 +391,12 @@ class Agents:
                      "", "## Latest results (all threads)", results_table(db, name, limit=15),
                      "", "## World now (live facts)", world_now(db, p),
                      "", "## World State summary", state_head(p)]
+            s = research.session(db, p)
+            if s["id"] and s["passes"]:
+                head += ["", "(You are resuming your own session: your earlier wakes, and any live chats operators "
+                             "had with you, are above in this conversation. The tables above are the state now.)"]
+                if s["rotate"]:
+                    head += ["", RESEARCHER_HANDOVER_ASK.format(k=(s["ctx"] or 0) // 1000)]
         elif role.name == "maintainer":
             m = self.maint.get(key) or {"author": "?", "request": "(no such request)", "context": None,
                                         "branch": None, "base_sha": None}
@@ -496,12 +525,16 @@ class Agents:
         return role.model
 
     def command(self, p: Project, role: RoleConfig, run_id: int, workdir: Path, sys_file: Path,
-                settings_file: Path, session: tuple[str, bool] | None = None, model: str | None = None) -> list[str]:
-        cmd = [self.cfg.claude_bin, "-p", "--output-format", "json", "--model", model or role.model,
+                settings_file: Path, session: tuple[str, bool] | None = None, model: str | None = None,
+                interactive: bool = False) -> list[str]:
+        """The agent's `claude -p` command line; `interactive` is the same session, prompt, guard and tools
+        opened in Claude Code for a person (`lab researcher chat`)."""
+        cmd = [self.cfg.claude_bin] + ([] if interactive else ["-p", "--output-format", "json"]) + [
+               "--model", model or role.model,
                "--append-system-prompt-file", str(sys_file), "--settings", str(settings_file),
                "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                "--add-dir", str(p.root), "--add-dir", str(p.dir),
-               "--name", f"lab:{p.name}:{role.name}:{run_id}"]
+               "--name", f"lab:{p.name}:{role.name}:{'chat' if interactive else run_id}"]
         if role.toolset:
             cmd += ["--tools", ",".join(role.toolset)]
         if role.effort:
@@ -572,6 +605,13 @@ class Agents:
             else:
                 session = (str(uuid.uuid4()), False)
                 self.db.update("threads", "id=?", (key,), session_id=session[0], session_cost=0)
+        elif role.name == "researcher":
+            s = research.session(self.db, p)
+            if s["id"] and s["passes"]:
+                session, rotating = (s["id"], True), bool(s["rotate"])
+            else:
+                session = (str(uuid.uuid4()), False)
+                research.set_session(self.db, p, id=session[0], passes=0, cost=0.0, ctx=None, rotate=False)
         # the handover pass is written by the main model, never by a routine-check model
         resumed_tokens = (t["context_tokens"] or 0) if role.name == "thread" and session and session[1] else 0
         model = role.model if rotating else self.model_for(role, evs, resumed_tokens)
@@ -598,15 +638,20 @@ class Agents:
         self.db.update("agent_runs", "id=?", (run_id,), status=status, ended_at=now(), session_id=res.get("session_id"),
                        result=text[:20000], error=(stderr[-2000:] if status != "ok" else None),
                        cost_usd=res.get("total_cost_usd"), num_turns=res.get("num_turns"), log_path=str(out_file))
+        lost = session and session[1] and status == "error" and re.search(
+            r"no conversation found|session.*not found|could not resume", (stderr + text), re.I)
         if role.name == "thread":
-            lost = session and session[1] and status == "error" and re.search(
-                r"no conversation found|session.*not found|could not resume", (stderr + text), re.I)
             if lost:  # the session is gone: start a fresh one next pass (notes and results survive)
                 self.db.update("threads", "id=?", (key,), session_id=None, session_passes=0, session_cost=0,
                                rotate_pending=0)
                 self.db.emit(p.name, "thread.continue", f"{key}: session lost, restarting fresh", key=key)
             elif status in ("ok", "timeout"):
                 self._after_thread_pass(p, key, run_id, session, res, status, rotating)
+        if role.name == "researcher":
+            if lost:  # its memory is RESEARCH.md: the next wake starts fresh from it
+                research.set_session(self.db, p, id=None, passes=0, cost=0.0, ctx=None, rotate=False)
+            elif status in ("ok", "timeout"):
+                self._after_researcher_pass(p, run_id, session, res, status, rotating)
         self.db.emit(p.name, "agent.finished", f"{role.name}{'/' + key if key else ''} run {run_id}: {status}",
                      key=key or None, severity="info" if status == "ok" else "minor")
         if status == "ratelimited":
@@ -644,6 +689,26 @@ class Agents:
             self.db.emit(p.name, "thread.log", f"{tid}: context {ctx // 1000}k tokens ≥ "
                          f"{p.rotate_context_tokens // 1000}k; next pass writes a handover", key=tid)
         self.db.update("threads", "id=?", (tid,), **cols)
+
+    def _after_researcher_pass(self, p: Project, run_id: int, session, res: dict, status: str,
+                               rotating: bool) -> None:
+        """The Researcher's session bookkeeping, as for a thread: its cost, context size and rotation."""
+        s = research.session(self.db, p)
+        total = res.get("total_cost_usd")          # the whole session's cost so far (live chats included)
+        if total is not None:
+            prev = (s["cost"] or 0) if session and session[1] else 0
+            self.db.update("agent_runs", "id=?", (run_id,), cost_usd=round(max(0.0, total - prev), 4))
+        ctx = context_tokens(res)
+        cols = dict(id=res.get("session_id") or s["id"], passes=(s["passes"] or 0) + 1,
+                    cost=total if total is not None else s["cost"], ctx=ctx if ctx is not None else s["ctx"])
+        if rotating and status == "ok":           # RESEARCH.md is up to date: the next wake starts fresh
+            research.set_session(self.db, p, id=None, passes=0, cost=0.0, ctx=None, rotate=False, gen=s["gen"] + 1)
+            self.db.emit(p.name, "research.rotated", f"Researcher session {s['gen']} closed at {(ctx or 0) // 1000}k "
+                         f"tokens; session {s['gen'] + 1} starts fresh from RESEARCH.md")
+            return
+        if p.rotate_context_tokens and ctx and ctx >= p.rotate_context_tokens and not s["rotate"]:
+            cols["rotate"] = True
+        research.set_session(self.db, p, **cols)
 
     def _backoff(self, run_id: int, r) -> None:
         streak = int(self.db.kv_get("_lab", "agent_backoff_streak", 0) or 0) + 1

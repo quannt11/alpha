@@ -2,8 +2,8 @@
 
 `labd` is a control plane (plain Python, no LLM, holds every credential) that watches the
 world, wakes Claude agents when something needs judgment, rents GPUs within a budget, and
-talks on Discord. Agents are `claude -p` runs per wake; research threads resume their own
-session every pass. State lives in SQLite (`~/.local/state/lab/lab.db`) and in files under
+talks on Discord. Agents are `claude -p` runs per wake; research threads and the Researcher resume
+their own session every pass. State lives in SQLite (`~/.local/state/lab/lab.db`) and in files under
 `projects/<name>/`.
 
 ```
@@ -18,7 +18,7 @@ Every agent's subagents run on Sonnet 5 (`CLAUDE_CODE_SUBAGENT_MODEL`).
 
 | Role | Model | Woken by | Does |
 |---|---|---|---|
-| researcher | Fable 5.1 | thread reports and questions, people's suggestions, briefs (normal+), new king, claim verdicts; a review tick every `schedule.research_tick_hours` (6) only while no task is queued or running | decides what to try: analyses the standing vs the king, reads papers and code, writes ideas with task specs, marks them `ready`, answers threads' strategic questions, keeps the shared research memory `work/RESEARCH.md`. Its prompt holds only ideas-related context. Fresh session per wake. |
+| researcher | Fable 5.1 | thread reports and questions, people's suggestions, briefs (normal+), new king, claim verdicts, an operator's message (at once); a review tick every `schedule.research_tick_hours` (6) only while no task is queued or running | decides what to try: analyses the standing vs the king, reads papers and code, writes ideas with task specs, marks them `ready`, answers threads' strategic questions, keeps the shared research memory `work/RESEARCH.md`. Its prompt holds only ideas-related context. One session across wakes, rotated like a thread's (it first brings RESEARCH.md up to date); operators can talk to it live (below). |
 | thread | Opus 5.5, effort medium, **Fable 5.1 as in-loop advisor** (routine job/lease checks: Sonnet 5, same session, no advisor) | its task (`thread.task`), its own loop (`NEXT: now/wait/sleep`), its job finishing/failing, lease changes, messages | an implementor: takes one task (`TASK.md`) at a time, rents/releases its GPUs, implements, evaluates, logs results, reports back (`lab thread report [--done]`, `lab thread ask`). Resumes its own Claude session across tasks; past `research.rotate_context_tokens` (150k) it writes `HANDOVER.md` and continues in a fresh session. |
 | scout | Sonnet 5 | `world.change.*` (normal+) | updates `world/STATE.md`, `KNOWN_STALE.md`, publishes briefs |
 | analyst | Opus 5.5 (claims), Sonnet 5 (daily report) | `thread.claim`, 09:00 | red-teams claims; daily report of everything the agents did since the last one |
@@ -51,6 +51,16 @@ Each role gets only the tools it uses (`toolset`, passed as `--tools`; ~8–10k 
 thread's routine check runs on Sonnet only while its session is under 40k tokens: the prompt cache is per model,
 so a light model resuming a big session would re-cache all of it.
 
+**Talking to the Researcher.** It is one ongoing session, so a person joins the real thing, not a copy:
+- `lab researcher chat` opens that session in interactive Claude Code (same system prompt, guard, tools, cwd).
+  It waits for a pass already under way, then holds the Researcher's wakes until you exit; the queued wakes
+  then resume the same session, which now remembers the chat. The lock is the chat's pid (a killed chat
+  holds nothing); `lab status` shows it. The chat's cost is booked as a researcher run (key `chat`).
+- `lab researcher say "..."` (or the dashboard's **Researcher** tab) wakes it at once — no debounce, no
+  waiting for the Scout — with your message; its final message is the reply. The tab follows the session's
+  transcript live (tool output and thinking left out). `lab researcher show` prints it in the terminal.
+- What should outlast the session belongs in RESEARCH.md's Directives; the prompt tells it so.
+
 ## Operate
 
 ```bash
@@ -59,6 +69,7 @@ journalctl --user -u labd -f
 lab status | lab world | lab events -n 50 | lab runs | lab budget | lab gpu list | lab gpu stock
 lab thread list | lab thread show t-001 | lab thread note t-001 --text "try X"
 lab idea list [--all] | lab idea show 7 | lab idea ready 7 [--thread t-001]   # the task queue
+lab researcher chat | lab researcher say "..." | lab researcher show   # talk to the Researcher (its own session)
 lab gpu pause "reason" | lab gpu resume   # humans only: stop all lab GPUs / allow them again (and wake threads)
 lab inject "question" --author me     # simulate a Discord request
 lab maint list | lab maint request "change X" | lab maint approve m-3   # lab changes (humans only)
@@ -66,8 +77,8 @@ lab emit tick.daily_report "now"      # force a daily report
 ```
 
 Dashboard: `lab web` (systemd `lab-web.service`, http://127.0.0.1:8765) shows health, alerts, budget, threads,
-GPUs, spend, agent runs, events, Discord and the inbox. It reads lab.db read-only; its buttons (pause/resume GPUs,
-message a thread, approve a lab change, triage ideas and tickets) run the matching `lab` command. From another
+GPUs, spend, agent runs, events, Discord and the inbox, and the Researcher's live conversation. It reads lab.db
+read-only; its buttons (pause/resume GPUs, message a thread or the Researcher, approve a lab change, triage ideas and tickets) run the matching `lab` command. From another
 machine: `ssh -L 8765:127.0.0.1:8765 <this host>`.
 
 Secrets (`KEY=VALUE`, first file wins): `~/.config/lab/secrets.env` (put `RUNPOD_API_KEY` and, optionally,
@@ -83,7 +94,9 @@ translates them (extend it with `[shadeform] gpu_map` in `lab.toml`). A Shadefor
 Ubuntu+CUDA VM: a startup script links /workspace to the largest disk and lets the PiC key in as root, so
 labrun, `lab push/ssh/launch` and the watchdog work unchanged. It **cannot be stopped**, so wherever the
 lab stops a Runpod pod (release `--stop`, 20 min idle, overtime, budget, pause) it deletes the VM,
-/workspace included. The lab only touches instances in its own `pods` table.
+/workspace included. The lab only touches instances in its own `pods` table. `lab gpu release --stop` also
+stops the holder's pod after a plain release, and a stop that fails is retried by labd until it works
+(`pods.stop_requested`, `fleet.stop_failed` event once).
 
 ### Vast.ai (third GPU source)
 With `VAST_API_KEY` set and `"VAST"` in `cloud_order`, Vast.ai marketplace offers compete on price too

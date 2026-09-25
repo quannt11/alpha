@@ -329,6 +329,24 @@ class Fleet:
         for l in self.db.all("SELECT * FROM leases WHERE project=? AND status='release_requested'", (self.p.name,)):
             await self._release(l, reason=l["reason"] or "released by holder",
                                 stop_now=bool(json.loads(l["job_status"] or "{}").get("stop_now")))
+        await self.process_stops()
+
+    async def process_stops(self) -> None:
+        """Stop unleased pods flagged by `lab gpu release --stop` or by a stop that failed; retried until it works."""
+        for pod in self.db.all("SELECT * FROM pods WHERE project=? AND stop_requested=1 AND terminated=0",
+                               (self.p.name,)):
+            if pod["lease_id"] or pod["state"] == "EXITED":
+                self.db.update("pods", "id=?", (pod["id"],), stop_requested=0)
+                continue
+            try:
+                how = await self.stop_pod(pod["id"])
+            except RunpodError as e:
+                self._once(pod["id"], f"stopfail{pod['idle_since']}", "fleet.stop_failed",
+                           f"could not stop {pod['name']} (retrying): {e}"[:300], "major")
+                continue
+            self.db.update("pods", "id=?", (pod["id"],), stop_requested=0)
+            self.db.emit(self.p.name, "fleet.stopped", f"{how} pod {pod['name']} on request", severity="info",
+                         key=pod["last_experiment"])
 
     async def _grant(self, l) -> None:
         h = holder_of(l)
@@ -381,7 +399,7 @@ class Fleet:
                     await self.api(pod_row["cloud"]).start(pod_row["id"])
                 pod_id, name, cloud, gtype = pod_row["id"], pod_row["name"], pod_row["cloud"], pod_row["gpu_type"]
                 self.db.update("pods", "id=?", (pod_id,), lease_id=l["id"], idle_since=None, last_pool=pool,
-                               last_experiment=h)
+                               last_experiment=h, stop_requested=0)
             else:
                 pod, gtype = await self._create(l, self.candidates(l))
                 pod_id, name, cloud = pod.id, pod.name, pod.cloud
@@ -540,6 +558,7 @@ class Fleet:
                     await self.stop_pod(l["pod_id"])
                 except RunpodError as e:
                     log.warning("stop on release failed: %r", e)
+                    self.db.update("pods", "id=?", (l["pod_id"],), stop_requested=1)   # process_stops retries
         self._lease_event(l, "released", reason, "info")
 
     # ------------------------------------------------------------ reconcile + billing

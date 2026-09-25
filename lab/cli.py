@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import re
+import uuid
 import tomllib
 from pathlib import Path
 
@@ -375,6 +376,112 @@ def cmd_thread(c: Ctx, a):
         print("claim filed; the Analyst will red-team it")
 
 
+def _researcher_idle(c: Ctx) -> None:
+    """Wait out a Researcher pass that already started (the chat lock keeps new ones from starting). Idle is
+    seen twice, a second apart, so a pass labd was launching as the lock landed is caught too."""
+    said, idle = False, 0
+    while idle < 2:
+        r = c.db.one("SELECT id, started_at FROM agent_runs WHERE project=? AND role='researcher' AND "
+                     "status='running'", (c.p.name,))
+        idle = 0 if r else idle + 1
+        if r and not said:
+            print(f"The Researcher is mid-pass (run {r['id']}, started {ago(r['started_at'])}); you join its session "
+                  f"when it finishes. Ctrl-C to give up.", flush=True)
+            said = True
+        time.sleep(5 if r else 1)
+
+
+def cmd_researcher(c: Ctx, a):
+    """Talk to the Researcher itself — its one session, live (lab/research.py): `chat` opens it in Claude Code
+    here, `say` wakes it with a message (the dashboard's chat box), `show` prints the conversation."""
+    db, p = c.db, c.p
+    role = p.roles["researcher"]
+    who = a.author or f"{os.environ.get('USER') or 'operator'} (terminal)"
+    if a.action in ("chat", "say"):
+        if os.environ.get("LAB_RUN_ID"):
+            die(f"researcher {a.action} is for people")
+        if not role.wake_on:
+            die(f"the {p.name} Researcher is off (watch mode: [agents.researcher] wake_on = [] in project.toml)")
+    s = research.session(db, p)
+    wd = p.work_dir / "researcher"
+    if a.action == "say":
+        text = _text_or_file(a.text or a.message)
+        if not text:
+            die('researcher say needs a message: lab researcher say "..."')
+        db.emit(p.name, "research.operator", f"{who} to the Researcher: {text[:300]}", severity="normal",
+                payload={"author": who, "text": text})
+        held = research.chat_holder(db, p)
+        print("sent: the Researcher wakes on it" + (f" when {held['by']}'s terminal chat ends" if held else " now")
+              + "; its reply shows in `lab researcher show` and on the dashboard")
+    elif a.action == "show":
+        held = research.chat_holder(db, p)
+        run = db.one("SELECT id, status, started_at FROM agent_runs WHERE project=? AND role='researcher' AND "
+                     "status IN ('running','queued') ORDER BY id", (p.name,))
+        print(f"session {s['id'] or '(none yet: the next wake starts one)'} — generation {s['gen']}, "
+              f"{s['passes']} pass(es), {(s['ctx'] or 0) // 1000}k tokens, ${s['cost'] or 0:.2f}"
+              + ("; rotates after its next wake" if s["rotate"] else ""))
+        print(f"live chat: {held['by']} since {iso(held['since'])}" if held else "live chat: none")
+        if run:
+            print(f"pass: run {run['id']} {run['status']}" + (f" since {ago(run['started_at'])}" if run["started_at"] else ""))
+        for e in research.transcript(research.session_path(wd, s["id"]), a.lines):
+            text = e["text"] if e["who"] != "user" or a.full else e["text"][:1500]
+            print(f"\n[{(e['ts'] or '')[:16].replace('T', ' ')}] {e['who']}:\n{text}")
+    elif a.action == "chat":
+        from .agents import Agents
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            die("researcher chat needs a terminal (from elsewhere: lab researcher say \"...\")")
+        held = research.chat_holder(db, p)
+        if held:
+            die(f"{held['by']} is already in a live chat with the Researcher (pid {held['pid']}, since {iso(held['since'])})")
+        db.x("UPDATE agent_runs SET status='interrupted', ended_at=? WHERE project=? AND role='researcher' AND "
+             "status='chat'", (now(), p.name))      # a chat that was killed
+        db.kv_set(p.name, research.CHAT_KEY, {"pid": os.getpid(), "by": who, "since": now()})
+        try:
+            _researcher_idle(c)
+            s = research.session(db, p)
+            resume = bool(s["id"] and s["passes"])
+            sid = s["id"] if resume else str(uuid.uuid4())
+            if not resume:
+                s = research.set_session(db, p, id=sid, passes=0, cost=0.0, ctx=None, rotate=False)
+            ag = Agents(db, c.cfg)
+            wd.mkdir(parents=True, exist_ok=True)
+            rid = db.insert("agent_runs", project=p.name, role="researcher", key="chat", status="chat",
+                            queued_at=now(), started_at=now(), model=role.model, session_id=sid, event_ids="[]")
+            base = ag.runs_dir / f"{rid:06d}-{p.name}-researcher-chat"
+            sys_file, settings_file = base.with_suffix(".system.md"), base.with_suffix(".settings.json")
+            sys_file.write_text(ag.system_prompt(p, role, wd))
+            settings_file.write_text(json.dumps(ag._settings(role, p), indent=1))
+            cmd = ag.command(p, role, rid, wd, sys_file, settings_file, (sid, resume), interactive=True)
+            waiting = db.one("SELECT COUNT(*) n FROM agent_runs WHERE project=? AND role='researcher' AND "
+                             "status='queued'", (p.name,))["n"]
+            print(f"The Researcher's own session ({sid}, {'resumed' if resume else 'new'}). labd holds its wakes"
+                  f"{f' ({waiting} waiting)' if waiting else ''} until you exit; then it carries on in this same "
+                  f"session and remembers this chat. Guidance that must outlast the session: ask it to put it "
+                  f"under Directives in RESEARCH.md.", flush=True)
+            started = now()
+            # started from inside a Claude Code session, its markers would make this one a child that saves no
+            # transcript — and a chat that isn't saved never reaches the Researcher's next wake
+            env = {k: v for k, v in ag.env(p, role, rid, "").items() if k == "CLAUDE_CODE_SUBAGENT_MODEL" or not (
+                k == "CLAUDECODE" or k.startswith(("CLAUDE_CODE_", "CLAUDE_PID", "CLAUDE_JOB_DIR", "CLAUDE_EFFORT")))}
+            rc = subprocess.run(cmd, cwd=wd, env=env).returncode
+            cost, ctx = research.session_totals(research.session_path(wd, sid))
+            if cost is not None:     # the chat reached the session (it exists on disk and was billed)
+                research.set_session(db, p, passes=max(s["passes"], 1), cost=cost,
+                                     ctx=ctx if ctx is not None else s["ctx"],
+                                     rotate=bool(s["rotate"] or (p.rotate_context_tokens and ctx
+                                                                 and ctx >= p.rotate_context_tokens)))
+            mins = (now() - started) / 60
+            used = round(max(0.0, cost - (s["cost"] or 0)), 4) if cost is not None else None
+            db.update("agent_runs", "id=?", (rid,), status="ok" if rc == 0 else "error", ended_at=now(),
+                      cost_usd=used, result=f"live chat with {who} ({mins:.0f} min)")
+            db.emit(p.name, "research.chat", f"{who} talked with the Researcher for {mins:.0f} min "
+                    f"(session {sid[:8]}, ${used or 0:.2f})", payload={"author": who, "session": sid, "run": rid})
+        finally:
+            if (db.kv_get(p.name, research.CHAT_KEY) or {}).get("pid") == os.getpid():
+                db.kv_set(p.name, research.CHAT_KEY, None)
+        print("Chat closed; the Researcher's wakes resume in this session.")
+
+
 def cmd_maint(c: Ctx, a):
     """Operators change the lab's code from Discord ("maint: …"); this is the same from the terminal."""
     m = Maint(c.db, c.cfg)
@@ -569,7 +676,9 @@ def cmd_gpu(c: Ctx, a):
                 return
             time.sleep(10)
     if a.action == "release":
-        _release_holder(db, h, stop=a.stop, reason=f"released by {ROLE}", lease_id=a.lease)
+        if not _release_holder(db, h, stop=a.stop, reason=f"released by {ROLE}", lease_id=a.lease):
+            die(f"nothing to release for {h}: no active lease{' ' + str(a.lease) if a.lease else ''}"
+                + ("" if a.stop else " (an unleased pod you used can be stopped with `lab gpu release --stop`)"))
         print("release requested" + (" (pod will be stopped now)" if a.stop else " (pod stops after 20 min idle)"))
     if a.action == "extend":
         l = _lease_for(c, h, a.lease)
@@ -768,6 +877,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_thread)
 
+    s = sub.add_parser("researcher", help="talk to the Researcher live: chat (its session in Claude Code), "
+                                          "say (a message that wakes it), show (the conversation)")
+    s.add_argument("action", choices=["chat", "say", "show"])
+    s.add_argument("message", nargs="?", help="say: the message (or --text; text or a file path)")
+    s.add_argument("--text")
+    s.add_argument("--author", help="who is talking (default: $USER (terminal))")
+    s.add_argument("-n", "--lines", type=int, default=30, help="show: how many entries of the conversation")
+    s.add_argument("--full", action="store_true", help="show: the wake prompts in full")
+    s.set_defaults(fn=cmd_researcher)
+
     s = sub.add_parser("maint", help="changes to the lab's own code (the maintainer)")
     s.add_argument("action", choices=["list", "show", "request", "approve", "reject", "mark"])
     s.add_argument("id", nargs="?", help="m-N (request: the change, in words)")
@@ -831,6 +950,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("args", nargs=argparse.REMAINDER)
     s.set_defaults(fn=cmd_web)
     sub.add_parser("daemon", help="run labd in the foreground").set_defaults(fn=cmd_daemon)
+    # `lab researcher chat --project affine` reads as naturally as `lab --project affine researcher chat`
+    for p in {id(p): p for p in sub.choices.values()}.values():
+        for opt in ("--project", "--config"):
+            if opt not in p._option_string_actions:
+                p.add_argument(opt, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     return ap
 
 
