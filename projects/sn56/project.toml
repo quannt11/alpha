@@ -1,0 +1,68 @@
+name = "sn56"
+# Gradients environment tournament (SN56). Sentinel plugin verified live against
+# api.gradients.io on 2026-09-25 (see plugin.py header) — real endpoints/schema,
+# not guessed from docs. test_mode mirrors affine's convention: real runs once
+# ready, budget.daily_usd is the only limit while true.
+test_mode = true
+root = "~/Work/sn56"              # first-level project folder (all repos under it)
+pod_prefix = "Pi_sn56"            # pods are Pi_sn56-01..N; Pi_sn56 stays the human dev box
+
+[discord]
+# TODO(operator): fill in before going live — no channel configured yet.
+guild_id = ""
+channel_id = ""
+
+[budget]
+daily_usd = 100                   # TODO(operator): confirm — set low to start, raise once trusted
+pools = ["research"]
+
+[schedule]
+daily_report = "09:00"            # lab timezone
+research_tick_hours = 6
+
+[research]
+max_threads = 1                   # start conservative; raise once the plugin/prompts are trusted
+rotate_context_tokens = 150000
+idle_retire_hours = 24
+
+[fleet]
+idle_stop_minutes = 20
+stall_minutes = 30
+check_hours = 2
+provision_timeout_minutes = 25
+shadeform_provision_timeout_minutes = 60
+vast_provision_timeout_minutes = 40
+capacity_retry_minutes = 10
+capacity_wait_hours = 6
+stock_refresh_minutes = 5
+# SN56 game-environment work (Goofspiel/Clobber/InterCode data-gen + local sim) is
+# mostly CPU-bound (see the project's recap: "fail fast on CPU before renting GPU").
+# GPU only needed for actual LoRA training/PvP eval once a hypothesis is validated
+# cheaply. Kept modest on purpose -- raise if threads start needing bigger boxes.
+stock_watch = { types = ["NVIDIA A100-SXM4-80GB", "NVIDIA L40S"], counts = [1, 2] }
+cloud_order = ["SHADEFORM", "COMMUNITY", "VAST"]   # Shadeform is what this team already knows how to use
+container_disk_gb = 80
+volume_gb = 200
+price_hints = { "NVIDIA A100-SXM4-80GB" = 1.89, "NVIDIA L40S" = 0.90 }
+
+[fleet.test_policy]                # only while test_mode = true
+max_gpus_per_experiment = 1
+allowed_gpu_types = ["NVIDIA A100-SXM4-80GB", "NVIDIA L40S"]
+
+[sentinel.intervals]               # seconds
+latest = 60          # tournament/latest/details -- cheap, covers text+image+environment in one call
+our_results = 60      # same endpoint, re-parsed for our_hotkeys' per-environment pvp results
+fees = 3600
+balance = 900
+
+[sn56]
+# TODO(operator): confirm this is still the right hotkey/coldkey before relying on
+# the sentinel -- source: ~/goofspiel_intercode_context_recap.md ("Hotkey công ty").
+our_hotkeys = ["5EEaxgnmqYG1r1NeutNKyPv95tKdfaMHZQrM1m9eU5o2bPLf"]
+our_coldkey = ""     # TODO(operator): fill in -- needed for the balance sentinel source
+
+# Per-role overrides of lab/config.py DEFAULT_ROLES (models: Researcher = Fable 5.1,
+# threads = Opus 5.5 medium effort with Fable 5.1 advisor, claim checks = Opus 5.5,
+# Concierge/Scout/daily report/routine checks = Sonnet 5). Uncomment to override, e.g.:
+# [agents.thread]
+# timeout_s = 5400
