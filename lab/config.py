@@ -44,6 +44,7 @@ class Project:
     pod_prefix: str
     guild_id: str
     channel_id: str
+    report_mirrors: dict[str, str]   # extra channel_id -> guild_id that get the daily report (and nothing else)
     daily_usd: float
     pools: dict[str, float | None]   # pool -> fraction of the daily cap, or None = label only (no cap)
     per_experiment_usd: float        # 0 = no per-experiment cap
@@ -88,9 +89,9 @@ class LabConfig:
     state_dir: Path
     db_path: Path
     secrets_files: list[Path]
-    max_concurrent_agents: int      # scout, researcher, analyst share these slots
-    max_concurrent_threads: int     # research threads are independent: each works on its own pods
-    max_concurrent_concierge: int   # people in Discord never wait behind background work
+    max_concurrent_agents: int      # per project: its scout, researcher, analyst share these slots
+    max_concurrent_threads: int     # per project; research threads are independent: each works on its own pods
+    max_concurrent_concierge: int   # per project; people in Discord never wait behind background work
     timezone: str
     claude_bin: str
     runpod: dict
@@ -123,7 +124,7 @@ DEFAULT_ROLES: dict[str, dict] = {
     # the research mind: analyses where we stand, reads papers, writes ideas that labd hands to threads,
     # answers the threads' questions and reads their reports. Its context is about ideas only.
     "researcher": {"model": FABLE, "toolset": CORE_TOOLS, "priority": 25, "timeout_s": 3600, "debounce_s": 90,
-                   "wake_on": ["thread.report", "thread.question", "research.suggestion", "world.brief",
+                   "wake_on": ["thread.report", "thread.question", "research.suggestion", "research.directive", "world.brief",
                                "board.king", "thread.claim.verdict", "tick.research"], "min_severity": "normal"},
     # an implementor: takes one task at a time, rents its GPUs, implements, evaluates, reports back;
     # consults Fable in-loop (the advisor strategy) at decisions it can't reasonably make alone
@@ -170,6 +171,7 @@ def load_project(pdir: Path) -> Project:
         pod_prefix=raw.get("pod_prefix", f"Pi_{raw['name']}"),
         guild_id=str(discord.get("guild_id", "")),
         channel_id=str(discord.get("channel_id", "")),
+        report_mirrors={str(m["channel_id"]): str(m["guild_id"]) for m in discord.get("daily_report_also", [])},
         daily_usd=float(budget.get("daily_usd", 0)),
         pools=_pools(budget.get("pools", ["agenda"])),
         per_experiment_usd=float(budget.get("per_experiment_usd", 0)),

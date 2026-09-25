@@ -94,7 +94,7 @@ async def test_lease_lifecycle_and_watchdog(db, fleet, rp):
     l = L(db, lid)
     assert l["status"] == "granted" and l["pod_name"] == "Pi_affine-01" and l["ssh_port"] == 40001
     assert ("create", "Pi_affine-01", "COMMUNITY") in rp.calls
-    assert l["est_usd"] == pytest.approx(4.0)
+    assert l["est_usd"] == pytest.approx(6.0)          # worst case: Secure $3 × 2h
     db.update("leases", "id=?", (lid,), job_name="r001-base")
     fleet.ssh.status = {"state": "running", "heartbeat_at": now()}
     await fleet.watchdog()
@@ -128,10 +128,10 @@ async def test_capacity_fallback_to_secure(db, fleet, rp):
 async def test_daily_budget_is_the_only_limit(db, fleet, rp):
     assert fleet.max_gpus == 0 and fleet.p.per_experiment_usd == 0
     add_thread(db)
-    big = lease(db, hours=250)                     # $500 on one lease: fine, no approval step
+    big = lease(db, hours=190)                     # $570 at worst on one lease: fine, no approval step
     await fleet.process_leases()
-    assert L(db, big)["status"] == "granted"
-    over = lease(db, hours=60)                     # $120 more → $620 > $600
+    assert L(db, big)["status"] == "granted"       # on Community: now reserves its real $380
+    over = lease(db, hours=75)                     # $225 more at worst → $605 > $600
     await fleet.process_leases()
     assert L(db, over)["status"] == "denied" and "daily budget" in L(db, over)["reason"]
 
@@ -230,7 +230,7 @@ async def test_alternative_gpu_used_when_primary_out_of_stock(db, fleet, rp):
     lid = lease(db, alts=["NVIDIA H200"])
     await fleet.process_leases()
     assert L(db, lid)["status"] == "granted" and L(db, lid)["gpu_type"] == "NVIDIA H200"
-    assert L(db, lid)["est_usd"] == pytest.approx(6.0)        # priced on the more expensive candidate
+    assert L(db, lid)["est_usd"] == pytest.approx(8.0)        # the dearer candidate on its dearest cloud
 
 
 async def test_clouds_that_cannot_host_the_count_are_skipped(db, fleet, rp):
@@ -240,6 +240,26 @@ async def test_clouds_that_cannot_host_the_count_are_skipped(db, fleet, rp):
     assert cloud == "SECURE" and est == pytest.approx(3.49 * 8)
     add_thread(db)
     lease(db, count=8, hours=1)
+    await fleet.process_leases()
+    assert [c[2] for c in rp.calls if c[0] == "create"] == ["SECURE"]
+
+
+async def test_estimate_reserves_the_dearest_cloud_the_lease_could_land_on(db, fleet, rp):
+    """The cheapest cloud may be sold out; the lease then lands on a dearer one."""
+    prices = {H100: {"COMMUNITY": 2.0, "SECURE": 3.0, "max": {"COMMUNITY": 8, "SECURE": 8}}}
+    rp.gpu_prices = lambda: asyncio.sleep(0, result=prices)
+    est, cloud = await fleet.estimate(H100, 2, 1.0)
+    assert cloud == "SECURE" and est == pytest.approx(6.0)
+
+
+async def test_a_max_of_zero_means_not_offered(db, fleet, rp):
+    """Runpod lists some GPUs with a price but max 0 (H200 NVL on Community at $0.50): not a real offer."""
+    prices = {H100: {"COMMUNITY": 0.5, "SECURE": 3.0, "max": {"COMMUNITY": 0, "SECURE": 8}}}
+    rp.gpu_prices = lambda: asyncio.sleep(0, result=prices)
+    est, cloud = await fleet.estimate(H100, 1, 1.0)
+    assert fleet.clouds_for(H100, 1) == ["SECURE"] and cloud == "SECURE" and est == pytest.approx(3.0)
+    add_thread(db)
+    lease(db)
     await fleet.process_leases()
     assert [c[2] for c in rp.calls if c[0] == "create"] == ["SECURE"]
 

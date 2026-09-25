@@ -3,9 +3,9 @@
 [lab]
 state_dir = "~/.local/state/lab"
 secrets_files = ["~/.config/lab/secrets.env", "~/Work/discord-reporter/.env"]
-max_concurrent_agents = 3          # director / scout / analyst share these
-max_concurrent_threads = 8         # research threads never wait on each other (each has its own pods)
-max_concurrent_concierge = 2       # Discord answers never queue behind background work
+max_concurrent_agents = 3          # per project: its scout / researcher / analyst share these
+max_concurrent_threads = 8         # per project: research threads never wait on each other (each has its own pods)
+max_concurrent_concierge = 2       # per project: Discord answers never queue behind background work
 timezone = "Asia/Ho_Chi_Minh"
 
 [claude]

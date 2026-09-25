@@ -34,25 +34,35 @@ def read(path: Path, limit: int = 12000) -> str:
     return t if len(t) <= limit else t[:limit] + f"\n… (truncated; {len(t)} chars total, read the file for the rest)"
 
 
+_PLUGINS: dict[Path, tuple[float, object]] = {}
+
+
+def _plugin(project):
+    """The project's plugin module (reloaded when plugin.py changes), or None."""
+    path = project.dir / "plugin.py"
+    if not path.exists():
+        return None
+    mtime = path.stat().st_mtime
+    if path not in _PLUGINS or _PLUGINS[path][0] != mtime:
+        from .sentinel import load_plugin
+        _PLUGINS[path] = (mtime, load_plugin(path))
+    return _PLUGINS[path][1]
+
+
 def world_facts(project) -> str:
+    """The headline facts of world.json. Each plugin knows its own world (`world_lines(world)`);
+    without that hook every top-level field is shown, compactly."""
     wj = project.world_dir / "world.json"
     if not wj.exists():
         return "(world.json not built yet — the Sentinel has not completed a first poll)"
     w = json.loads(wj.read_text())
-    c = w.get("contract", {})
-    keys = [k for k in ("subnet.weight_version_key", "duel.score_mode", "duel.n_turns", "duel.max_thought_tokens",
-                        "duel.ref_max_tokens", "duel.sd_meter.min_margin_sd", "duel.sd_meter.k_sigma",
-                        "duel.thought_rendering", "subnet.king_payout_window_hours") if k in c]
-    lines = [f"world_version: {w.get('world_version')}  (generated {w.get('generated_at')})",
-             f"teacher: {w.get('teacher')}",
-             "contract: " + ", ".join(f"{k}={c[k]}" for k in keys),
-             f"corpus: {json.dumps(w.get('corpus'))}",
-             f"curriculum: {json.dumps(w.get('curriculum'))}",
-             f"king: {json.dumps(w.get('king'))}",
-             f"payout: {json.dumps(w.get('payout'))}",
-             f"our crowns: {json.dumps(w.get('ours')) if w.get('ours') else '(none configured / none held)'}",
-             f"latest fork section in llms.txt: {w.get('llms', {}).get('latest_fork')}"]
-    return "\n".join(lines)
+    head = f"world_version: {w.get('world_version')}  (generated {w.get('generated_at')})"
+    plugin = _plugin(project)
+    if plugin is not None and hasattr(plugin, "world_lines"):
+        return "\n".join([head, *plugin.world_lines(w)])
+    rest = [f"{k}: {json.dumps(v, default=str)[:600]}" for k, v in w.items()
+            if k not in ("world_version", "generated_at")]
+    return "\n".join([head, *rest])
 
 
 STATE_VERSION = re.compile(r"World version:\s*`([^`]+)`")

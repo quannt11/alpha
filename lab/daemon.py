@@ -36,6 +36,31 @@ from .sentinel import Sentinel, load_plugin
 
 log = logging.getLogger("labd")
 
+
+class RedactSecrets(logging.Filter):
+    """Masks credential values in every log line and traceback: a library's error message can quote a
+    request (URL, headers), and the journal is readable by anyone on this account."""
+
+    def __init__(self, secrets: dict[str, str]):
+        super().__init__()
+        self.values = sorted((v for k, v in secrets.items()
+                              if re.search(r"KEY|TOKEN|SECRET|PASSWORD", k) and len(v) >= 12), key=len, reverse=True)
+
+    def _mask(self, s: str) -> str:
+        for v in self.values:
+            s = s.replace(v, "***")
+        return s
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if any(v in msg for v in self.values):
+            record.msg, record.args = self._mask(msg), None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text and any(v in record.exc_text for v in self.values):
+            record.exc_text = self._mask(record.exc_text)
+        return True
+
 ANNOUNCE = {
     "board.king": "**New king on the board.** {summary}",
     "board.audit": "**Exploit audit:** {summary}",
@@ -59,6 +84,9 @@ class Daemon:
         self.cfg = cfg
         self.db = DB(cfg.db_path)
         self.secrets = config_mod.load_secrets(cfg)
+        redact = RedactSecrets(self.secrets)
+        for h in logging.getLogger().handlers:      # handler-level: records from every logger pass through
+            h.addFilter(redact)
         self.stop = asyncio.Event()
         self.discord: DiscordREST | None = None
         self.gateway: Gateway | None = None
@@ -107,7 +135,11 @@ class Daemon:
                         continue
                     try:
                         files = json.loads(r["files"]) if r["files"] else None
-                        ids = await self.discord.send(Destination(p.guild_id, p.channel_id), r["channel_id"] or p.channel_id,
+                        ch = r["channel_id"] or p.channel_id
+                        # a report mirror is its own pinned destination, and only for the analyst's posts
+                        dest = (Destination(p.report_mirrors[ch], ch) if ch in p.report_mirrors
+                                and r["author_role"] == "analyst" else Destination(p.guild_id, p.channel_id))
+                        ids = await self.discord.send(dest, ch,
                                                       r["content"], reply_to=r["reply_to"], files=files)
                         self.db.update("outbox", "id=?", (r["id"],), status="sent", sent_at=now(),
                                        message_ids=json.dumps(ids))
@@ -424,6 +456,11 @@ class Daemon:
             for p in self.cfg.projects.values():
                 if p.channel_id:
                     await self.discord.check_destination(Destination(p.guild_id, p.channel_id), p.channel_id)
+                for ch, guild in p.report_mirrors.items():
+                    try:
+                        await self.discord.check_destination(Destination(guild, ch), ch)
+                    except DiscordError as e:
+                        log.warning("[%s] daily-report mirror %s unusable: %s", p.name, ch, e)
         except DiscordError as e:
             # A Discord problem must not take the rest of the lab down: run without it and say so.
             log.error("Discord disabled: %s", e)

@@ -81,6 +81,20 @@ def test_thread_report_ask_and_suggest(labdir, cfg, monkeypatch, tmp_path):
         run("idea", "ready", "1")                                     # done ideas cannot be requeued
 
 
+def test_a_directive_is_not_an_idea_and_stays_in_the_researchers_prompt(labdir, cfg):
+    run("idea", "suggest", "--directive", "--title", "corpus as sample source", "--author", "Duc", "--message", "77",
+        "--body", "use corpus data, not only published duels, in every idea. " + "x" * 300)   # longer than a filename
+    db = DB(cfg.db_path)
+    assert not db.one("SELECT 1 FROM backlog")                        # no idea filed
+    ev = db.one("SELECT * FROM events WHERE topic='research.directive'")
+    assert "research.directive" in cfg.project("affine").roles["researcher"].wake_on
+    p = cfg.project("affine")
+    p.work_dir.mkdir(parents=True, exist_ok=True)
+    later = db.one("SELECT * FROM events WHERE id=?", (db.emit("affine", "thread.report", "r1", key="t-001"),))
+    text = Agents(db, cfg).user_prompt(p, p.roles["researcher"], "", [later])   # a later wake still sees it
+    assert "not only published duels, in every idea" in text and "msg 77" in text and ev["id"]
+
+
 def test_researcher_wakes_on_reports_not_on_its_own_or_ops_events(cfg, db):
     a = Agents(db, cfg)
     role = cfg.project("affine").roles["researcher"]

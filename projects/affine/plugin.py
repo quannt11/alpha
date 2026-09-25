@@ -8,6 +8,7 @@ corpus epoch comes from api/v1/dataset.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from datetime import datetime, timezone
@@ -271,6 +272,22 @@ def sources(project) -> list[Source]:
         Source("audits", iv.get("audits", 600), fetch_audits, classify_audits),
         Source("upstream", iv.get("upstream", 3600), fetch_github, classify_github),
     ]
+
+
+def world_lines(w: dict) -> list[str]:
+    """The facts every agent prompt shows (after the world_version line)."""
+    c = w.get("contract", {})
+    keys = [k for k in ("subnet.weight_version_key", "duel.score_mode", "duel.n_turns", "duel.max_thought_tokens",
+                        "duel.ref_max_tokens", "duel.sd_meter.min_margin_sd", "duel.sd_meter.k_sigma",
+                        "duel.thought_rendering", "subnet.king_payout_window_hours") if k in c]
+    return [f"teacher: {w.get('teacher')}",
+            "contract: " + ", ".join(f"{k}={c[k]}" for k in keys),
+            f"corpus: {json.dumps(w.get('corpus'))}",
+            f"curriculum: {json.dumps(w.get('curriculum'))}",
+            f"king: {json.dumps(w.get('king'))}",
+            f"payout: {json.dumps(w.get('payout'))}",
+            f"our crowns: {json.dumps(w.get('ours')) if w.get('ours') else '(none configured / none held)'}",
+            f"latest fork section in llms.txt: {w.get('llms', {}).get('latest_fork')}"]
 
 
 def build_world(facts: dict[str, dict]) -> dict:

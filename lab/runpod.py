@@ -71,9 +71,12 @@ class Runpod:
         self.key = api_key
         self.client = client or httpx.AsyncClient(timeout=60)
 
+    def _auth(self) -> dict[str, str]:
+        """The key goes in a header, never in the URL: httpx puts the URL into its error messages."""
+        return {"Authorization": f"Bearer {self.key}"}
+
     async def _req(self, method: str, path: str, body: dict | None = None):
-        r = await self.client.request(method, REST + path, json=body,
-                                      headers={"Authorization": f"Bearer {self.key}"})
+        r = await self.client.request(method, REST + path, json=body, headers=self._auth())
         if r.status_code >= 400:
             text = r.text[:500]
             raise RunpodError(f"runpod {method} {path}: {r.status_code} {text}", r.status_code,
@@ -113,7 +116,7 @@ class Runpod:
         """{gpu_id: {"COMMUNITY": price, "SECURE": price, "memory": GB, "max": {cloud: max GPUs per pod}}}."""
         q = ("query { gpuTypes { id displayName memoryInGb communityPrice securePrice "
              "maxGpuCountCommunityCloud maxGpuCountSecureCloud } }")
-        r = await self.client.post(GRAPHQL, params={"api_key": self.key}, json={"query": q})
+        r = await self.client.post(GRAPHQL, headers=self._auth(), json={"query": q})
         r.raise_for_status()
         out = {}
         for g in (r.json().get("data") or {}).get("gpuTypes") or []:
@@ -132,7 +135,7 @@ class Runpod:
             parts = [f'g{j}: gpuTypes(input: {{id: "{t}"}}) {{ lowestPrice(input: {{gpuCount: {c}, '
                      f'secureCloud: {"true" if cl == "SECURE" else "false"}}}) {{ stockStatus }} }}'
                      for j, (t, c, cl) in enumerate(batch)]
-            r = await self.client.post(GRAPHQL, params={"api_key": self.key},
+            r = await self.client.post(GRAPHQL, headers=self._auth(),
                                        json={"query": "query {\n" + "\n".join(parts) + "\n}"})
             r.raise_for_status()
             data = r.json().get("data") or {}

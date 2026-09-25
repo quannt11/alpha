@@ -1,0 +1,64 @@
+name = "albedo"
+# Test mode applies [fleet.test_policy] (one H100 per experiment). Off: the only limit is budget.daily_usd.
+test_mode = false
+root = "~/Work/albedo"             # the albedo checkout (github.com/unarbos/albedo, public)
+pod_prefix = "Pi_albedo"           # pods are Pi_albedo-01..N; Pi_albedo stays the human dev box
+
+[discord]
+# Test server "Pi", channel #97. The daily report is also posted to ZenAI #albedo; replies there are ignored.
+guild_id = "1480562634783723610"
+channel_id = "1490027838441656575"
+# daily_report_also = [{ guild_id = "<guild id>", channel_id = "<channel id>" }]
+
+# WATCH MODE (since 2026-09-25, operator's choice): the Sentinel, Scout, Concierge and daily report run;
+# nothing rents GPUs and no research runs. To go live (operator's call; agreed budget $400/day):
+#   daily_usd = 400, research_tick_hours = 6, max_threads = 1, delete [agents.researcher] below; restart labd.
+[budget]
+daily_usd = 0                      # the only spending limit: new leases are refused past it (0 = no GPUs)
+pools = ["research"]               # accounting label only; spend is also tracked per thread
+
+[schedule]
+daily_report = "09:00"             # lab timezone; covers everything since the previous report
+research_tick_hours = 0            # watch mode: no review tick (6 when live)
+
+[research]
+max_threads = 0                    # watch mode: no implementor threads (1 when live)
+rotate_context_tokens = 150000
+idle_retire_hours = 24
+
+[agents.researcher]
+wake_on = []                       # watch mode: the Researcher sleeps (remove this table to go live)
+
+[fleet]
+idle_stop_minutes = 20
+stall_minutes = 30
+check_hours = 2
+provision_timeout_minutes = 25
+shadeform_provision_timeout_minutes = 60
+vast_provision_timeout_minutes = 40
+capacity_retry_minutes = 10
+capacity_wait_hours = 6
+stock_refresh_minutes = 5
+# Qwen3.6-35B-A3B is ~72 GB in bf16: serving needs ≥1×H200/B200 or 2×H100; the validator duels on 8 GPUs (4+4, TP 4).
+stock_watch = { types = ["NVIDIA H100 80GB HBM3", "NVIDIA H200", "NVIDIA B200"], counts = [1, 2, 4, 8] }
+cloud_order = ["COMMUNITY", "SECURE", "SHADEFORM", "VAST"]
+container_disk_gb = 120            # a 72 GB checkpoint plus the env
+volume_gb = 300
+price_hints = { "NVIDIA H100 80GB HBM3" = 2.99, "NVIDIA H200" = 3.99, "NVIDIA B200" = 5.99 }
+
+[fleet.test_policy]                # only while test_mode = true
+max_gpus_per_experiment = 1
+allowed_gpu_types = ["NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe", "NVIDIA H100 NVL"]
+
+[sentinel.intervals]               # seconds; conditional GETs make fast polling cheap
+board = 60                         # reign / king (dashboard.json, ~700 KB, 304 when unchanged)
+verdicts = 60
+fails = 300
+contract = 300                     # dashboard knobs + the newest eval's request.json
+dataset = 900
+llms = 300
+code = 900                         # upstream scoring/admission files on GitHub main
+upstream = 900                     # GitHub commits API: 60 req/h unauthenticated
+
+[albedo]
+our_hotkeys = []                   # add our ss58 hotkeys to get reign-slot alerts

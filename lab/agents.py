@@ -73,6 +73,19 @@ def fmt_events(rows, payload_limit: int) -> str:
     return "\n".join(out) or "(no events)"
 
 
+def directives_text(db, project: str) -> str:
+    """Every directive people have given, so a RESEARCH.md trim can never drop one; a later one may withdraw
+    or amend an earlier one."""
+    rows = db.all("SELECT * FROM events WHERE project=? AND topic='research.directive' ORDER BY id", (project,))
+    out = []
+    for r in rows:
+        d = json.loads(r["payload"] or "{}")
+        out.append(f"- [{time.strftime('%Y-%m-%d', time.gmtime(r['ts']))}] {d.get('author') or '?'}"
+                   f"{' (msg ' + d['message_id'] + ')' if d.get('message_id') else ''}: {d.get('title') or ''} — "
+                   + " ".join((d.get("text") or "").split())[:800])
+    return "\n".join(out) or "(none)"
+
+
 HANDOVER_ASK = """## This is the last pass of this session
 Your conversation is {k}k tokens long, and every tool call re-reads all of it. After this pass the lab
 starts you in a fresh session. Do this wake's work as usual; then, before your report, (over)write
@@ -99,7 +112,7 @@ class Agents:
         self.cfg = cfg
         self.on_result = on_result          # async (project, role, key, run_row, result_dict) -> None
         self.tasks: dict[int, asyncio.Task] = {}
-        self._roles: dict[int, str] = {}         # run id -> role, for slot accounting
+        self._roles: dict[int, tuple[str, str]] = {}   # run id -> (project, role), for slot accounting
         self.maint = Maint(db, cfg)
         self.runs_dir = cfg.state_dir / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -217,13 +230,19 @@ class Agents:
     def slot_class(self, role: str) -> str:
         return role if role in ("thread", "concierge", "maintainer") else "thinker"
 
+    def slot_pool(self, project: str, role: str) -> tuple[str, str]:
+        """Every project has its own workers: its slots never go to another project's agents. The maintainer
+        changes the shared lab code, so it has one lab-wide slot."""
+        cls = self.slot_class(role)
+        return ("_lab" if cls == "maintainer" else project, cls)
+
     def slot_limit(self, cls: str) -> int:
         return {"thread": self.cfg.max_concurrent_threads, "concierge": self.cfg.max_concurrent_concierge,
                 "maintainer": 1}.get(cls, self.cfg.max_concurrent_agents)
 
     def launch(self) -> None:
-        """Start queued runs by priority. Research threads, the concierge and the thinking roles have
-        separate slot pools, so threads (each on its own pods) never wait for each other or the Researcher."""
+        """Start queued runs by priority. Each project has its own slot pools (research threads, the concierge,
+        the thinking roles), so threads never wait for the Researcher and one project never waits for another."""
         if self.backoff_until() > now():
             return
         rows = self.db.all("SELECT * FROM agent_runs WHERE status='queued' ORDER BY id")
@@ -231,11 +250,11 @@ class Agents:
             return
         # a lab deploy is waiting for the agents to go idle: only people's questions still start
         hold = float(self.db.kv_get("_lab", "agents_hold_until", 0) or 0) > now()
-        in_use: dict[str, int] = {}
+        in_use: dict[tuple[str, str], int] = {}
         for rid, t in self.tasks.items():
             if not t.done():
-                cls = self.slot_class(self._roles.get(rid, "thinker"))
-                in_use[cls] = in_use.get(cls, 0) + 1
+                pool = self.slot_pool(*self._roles.get(rid, ("_lab", "thinker")))
+                in_use[pool] = in_use.get(pool, 0) + 1
         prio = lambda r: (self.cfg.projects[r["project"]].roles[r["role"]].priority
                           if r["project"] in self.cfg.projects and r["role"] in self.cfg.projects[r["project"]].roles
                           else 99, r["id"])
@@ -245,12 +264,12 @@ class Agents:
                 continue
             if hold and r["role"] != "concierge":
                 continue
-            cls = self.slot_class(r["role"])
-            if in_use.get(cls, 0) >= self.slot_limit(cls):
+            pool = self.slot_pool(r["project"], r["role"])
+            if in_use.get(pool, 0) >= self.slot_limit(pool[1]):
                 continue
-            in_use[cls] = in_use.get(cls, 0) + 1
+            in_use[pool] = in_use.get(pool, 0) + 1
             self.db.update("agent_runs", "id=?", (r["id"],), status="running", started_at=now())
-            self._roles[r["id"]] = r["role"]
+            self._roles[r["id"]] = (r["project"], r["role"])
             self.tasks[r["id"]] = asyncio.create_task(self._run(r["id"]))
 
     async def shutdown(self) -> None:
@@ -338,6 +357,8 @@ class Agents:
                           "ORDER BY COALESCE(done_at, created_at) DESC LIMIT 8", (name,))
             head += ["", "## The shared research memory (yours to keep; every thread reads it)",
                      file_ref(research_doc(p), "your memory between wakes: read it first"),
+                     "", "## People's directives (standing guidance for every idea, newest last)",
+                     directives_text(db, name),
                      "", "## Open ideas", backlog_table(db, name, spec=600),
                      "", "## Recently closed ideas (newest first)",
                      "\n".join(f"- idea {r['id']} [{r['status']}] {r['title']}: "

@@ -337,3 +337,33 @@ async def test_timed_out_handover_pass_does_not_rotate(db, cfg, fake):
     a._after_thread_pass(p, "t-001", rid, ("s-old", True), {"total_cost_usd": 1.0}, "timeout", True)
     t = db.one("SELECT * FROM threads")
     assert t["session_id"] == "s-old" and t["rotate_pending"] == 1 and t["generation"] == 1
+
+
+async def test_every_project_has_its_own_workers(labdir, db, fake):
+    """affine filling its thinker slots does not hold up beta's Scout; the maintainer slot stays lab-wide."""
+    import shutil
+    from lab import config as config_mod
+    shutil.copytree(labdir / "projects" / "affine", labdir / "projects" / "beta")
+    toml = labdir / "projects" / "beta" / "project.toml"
+    toml.write_text(toml.read_text().replace('name = "affine"', 'name = "beta"'))
+    cfg = config_mod.load(labdir / "lab.toml")
+    os.environ["FAKE_SLEEP"] = "0.3"
+    try:
+        a = Agents(db, cfg)
+        for proj, role in (("affine", "researcher"), ("affine", "scout"), ("affine", "analyst"), ("beta", "scout"),
+                           ("affine", "maintainer"), ("beta", "maintainer")):
+            db.insert("agent_runs", project=proj, role=role, key="m-1" if role == "maintainer" else "",
+                      status="queued", queued_at=now(), event_ids="[]")
+        a.launch()
+        running = [(r["project"], r["role"]) for r in runs(db) if r["status"] == "running"]
+        assert ("beta", "scout") in running                                   # its own slots
+        assert sum(1 for p, r in running if p == "affine" and r != "maintainer") == 2   # affine's 2 thinker slots
+        assert sum(1 for _, r in running if r == "maintainer") == 1                      # one lab-wide
+        await asyncio.gather(*a.tasks.values())
+    finally:
+        os.environ.pop("FAKE_SLEEP", None)
+
+
+def test_thread_ids_are_unique_across_projects(db):
+    add_thread(db, "t-004")
+    assert db.next_thread_id("albedo") == "t-005"

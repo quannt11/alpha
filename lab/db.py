@@ -232,7 +232,9 @@ class DB:
 
     # ---- ids ---------------------------------------------------------------
     def next_thread_id(self, project: str) -> str:
-        rows = self.all("SELECT id FROM threads WHERE project=?", (project,))
+        """Thread ids are the table's primary key and name leases, events and Discord threads: numbered
+        lab-wide, so two projects never both have a t-001."""
+        rows = self.all("SELECT id FROM threads")
         n = max((int(r["id"].split("-")[-1]) for r in rows if r["id"].split("-")[-1].isdigit()), default=0)
         return f"t-{n + 1:03d}"
 

@@ -59,7 +59,7 @@ journalctl --user -u labd -f
 lab status | lab world | lab events -n 50 | lab runs | lab budget | lab gpu list | lab gpu stock
 lab thread list | lab thread show t-001 | lab thread note t-001 --text "try X"
 lab idea list [--all] | lab idea show 7 | lab idea ready 7 [--thread t-001]   # the task queue
-lab gpu pause "reason" | lab gpu resume   # humans only: stop all lab GPUs / allow them again
+lab gpu pause "reason" | lab gpu resume   # humans only: stop all lab GPUs / allow them again (and wake threads)
 lab inject "question" --author me     # simulate a Discord request
 lab maint list | lab maint request "change X" | lab maint approve m-3   # lab changes (humans only)
 lab emit tick.daily_report "now"      # force a daily report
@@ -135,7 +135,12 @@ Operators (`lab.toml` `[maintainer].operators`, Discord user ids — checked in 
 
 ## Add a project
 Create `projects/<name>/` with `project.toml` (copy affine's), `plugin.py` (`sources()` +
-`build_world()`), `prompts/`, `TASK_TEMPLATE.md`; restart labd.
+`build_world()`, and `world_lines(world)` for the facts every prompt shows), `prompts/`, `TASK_TEMPLATE.md`;
+restart labd. Projects today: `affine` (SN120) and `albedo` (SN97, in watch mode: no GPUs, threads or Researcher
+until an operator raises its budget — see its project.toml). With several projects, `lab` commands take
+`--project` (or the project whose folder or code root holds the cwd); `lab status` alone shows them all.
+`build_world()`'s `world_version` should read `<rules>-<fast part>-<rules hash>`: labd ignores the middle part
+when it flags ideas written under older rules.
 `projects/<name>/CLAUDE.md` holds the project's goal and the operators' standing rules for that project ("never train LoRA", …):
 every project agent works under that folder, so Claude Code loads it, and edits reach resumed thread sessions on
 their next pass. Agents cannot edit it; `maint:` edits to it wait for an operator's approval.

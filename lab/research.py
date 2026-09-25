@@ -126,6 +126,9 @@ def research_idle(db: DB, p) -> bool:
 
 
 def text_or_file(v: str | None) -> str:
-    if v and len(v) < 4096 and Path(v).expanduser().is_file():
-        return Path(v).expanduser().read_text()
+    try:
+        if v and len(v) < 4096 and Path(v).expanduser().is_file():
+            return Path(v).expanduser().read_text()
+    except OSError:   # a long one-line text is not a path ("File name too long")
+        pass
     return v or ""

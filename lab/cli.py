@@ -29,6 +29,7 @@ from .research import text_or_file
 from .sentinel import flatten
 
 ROLE = os.environ.get("LAB_ROLE", "human")
+ALL_PROJECT_CMDS = ("status", "doctor", "web", "daemon", "maint")   # fine without a project when there are several
 VALID_POOLS_HINT = "agenda | explore | request"
 
 
@@ -41,12 +42,23 @@ class Ctx:
     def __init__(self, args):
         self.cfg = config_mod.load(getattr(args, "config", None))
         self.db = DB(self.cfg.db_path)
-        name = getattr(args, "project", None) or os.environ.get("LAB_PROJECT")
-        if not name:
-            if len(self.cfg.projects) != 1:
-                die(f"which project? pass --project ({', '.join(self.cfg.projects)})")
+        name = getattr(args, "project", None) or os.environ.get("LAB_PROJECT") or self._project_of_cwd()
+        if not name and len(self.cfg.projects) == 1:
             name = next(iter(self.cfg.projects))
+        # with several projects, `status` and `doctor` cover them all (lab-deploy's health check runs `lab status`)
+        if not name and getattr(args, "cmd", None) in ALL_PROJECT_CMDS:
+            self.p = None
+            return
+        if not name:
+            die(f"which project? pass --project ({', '.join(self.cfg.projects)})")
         self.p = self.cfg.project(name)
+
+    def _project_of_cwd(self) -> str | None:
+        cwd = Path.cwd().resolve()
+        for p in self.cfg.projects.values():
+            if any(cwd == d or d in cwd.parents for d in (p.dir, p.root)):
+                return p.name
+        return None
 
 
 # ---------------------------------------------------------------- status / world / events
@@ -55,7 +67,7 @@ class Ctx:
 def cmd_status(c: Ctx, a):
     hb = float(c.db.kv_get("_lab", "heartbeat", 0) or 0)
     print(f"labd heartbeat: {ago(hb)}" + ("  (DAEMON DOWN?)" if now() - hb > 120 else ""))
-    print(status_text(c.db, c.cfg, c.p))
+    print("\n\n".join(status_text(c.db, c.cfg, p) for p in ([c.p] if c.p else c.cfg.projects.values())))
 
 
 def cmd_world(c: Ctx, a):
@@ -132,16 +144,24 @@ def cmd_runs(c: Ctx, a):
 
 
 def cmd_say(c: Ctx, a):
-    text = a.text if a.text != "-" else sys.stdin.read()
     if a.file_text:
         text = Path(a.file_text).read_text()
+    else:
+        text = a.text if a.text != "-" else sys.stdin.read()
     files = [str(Path(f).resolve()) for f in (a.F or [])]
     for f in files:
         if not Path(f).exists():
             die(f"attachment not found: {f}")
+    if a.channel_id in c.p.report_mirrors:
+        die("that channel only gets the daily report")
     oid = c.db.insert("outbox", project=c.p.name, channel_id=a.channel_id or c.p.channel_id, content=text,
                       reply_to=a.reply_to, files=json.dumps(files) if files else None, status="pending",
                       created_at=now(), author_role=ROLE)
+    # The analyst's daily report (work/analyst/daily-<date>.md) also goes to the mirror channels.
+    if ROLE == "analyst" and a.file_text and re.fullmatch(r"daily-\d{4}-\d{2}-\d{2}\.md", Path(a.file_text).name):
+        for ch in c.p.report_mirrors:
+            c.db.insert("outbox", project=c.p.name, channel_id=ch, content=text, files=json.dumps(files) if files else None,
+                        status="pending", created_at=now(), author_role=ROLE)
     if a.wait:
         for _ in range(60):
             r = c.db.one("SELECT status, error FROM outbox WHERE id=?", (oid,))
@@ -215,6 +235,14 @@ def cmd_backlog(c: Ctx, a):
         if files:   # the files travel by path, untouched; the Researcher reads them in full
             a.body = ((a.body or "") + "\n\nAttached files (verbatim; read them in full):\n"
                       + "\n".join(f"- {f}" for f in files)).strip()
+        if a.directive:   # guidance for every idea, not a task: no backlog row; the Researcher applies it
+            if not suggest:
+                die("--directive goes with `lab idea suggest`")
+            eid = db.emit(p.name, "research.directive", f"directive from {a.author or ROLE}: {a.title}",
+                          severity="normal", payload={"message_id": a.message, "files": files, "author": a.author,
+                                                      "title": a.title, "text": text_or_file(a.spec or a.body)})
+            print(f"directive recorded (event {eid}) — the Researcher applies it to its memory and every open idea")
+            return
         status = "suggested" if suggest else ("ready" if a.ready else "proposed")
         bid = db.insert("backlog", project=p.name, created_at=now(), author=a.author or ROLE, title=a.title,
                         hypothesis=a.hypothesis, expected_gain=a.gain, est_cost_usd=a.cost, priority=a.priority,
@@ -362,6 +390,8 @@ def cmd_maint(c: Ctx, a):
     elif a.action == "request":
         if not a.id:
             die('maint request "what to change"')
+        if not c.p:
+            die(f"which project should report it? pass --project ({', '.join(c.cfg.projects)})")
         mid = m.request(c.p.name, author_id="terminal", author=a.text or "operator (terminal)", text=a.id)
         print(f"queued {mid}; the maintainer's report goes to Discord (`lab maint show {mid}`)")
     elif a.action == "mark":
@@ -487,6 +517,10 @@ def cmd_gpu(c: Ctx, a):
             db.kv_set(p.name, "gpu_paused", None)
             db.emit(p.name, "operator.resume", f"GPU work resumed{': ' + a.pattern if a.pattern else ''}",
                     severity="major")
+            # a thread that went to `NEXT: wait` while paused would otherwise sleep until its hourly safety check
+            for t in db.all("SELECT id FROM threads WHERE project=? AND status='active' AND task_id IS NOT NULL",
+                            (p.name,)):
+                db.emit(p.name, "thread.continue", f"{t['id']}: GPUs resumed", key=t["id"])
             print("GPUs resumed")
         return
     if a.action == "stock":
@@ -717,6 +751,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--author")
     s.add_argument("--message", help="suggest: the Discord message id it came from")
     s.add_argument("--file", action="append", help="suggest: a file to pass on verbatim (repeatable)")
+    s.add_argument("--directive", action="store_true",
+                   help="suggest: standing guidance for all ideas (how to work), not one more idea to try")
     s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_backlog)
 

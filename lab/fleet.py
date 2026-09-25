@@ -151,14 +151,16 @@ class Fleet:
 
     def clouds_for(self, gpu_type: str, count: int) -> list[str]:
         """Clouds from cloud_order that we hold a key for and that allow `count` GPUs of this type in one
-        pod (unknown = allowed). Shadeform and Vast only if they have an equivalent of the Runpod GPU id."""
+        pod (unknown = allowed; a max of 0 means the cloud does not offer it, whatever its listed price).
+        Shadeform and Vast only if they have an equivalent of the Runpod GPU id."""
         mx = (self._prices.get(gpu_type) or {}).get("max") or {}
-        return [c for c in self.cloud_order if self.api(c) and (not mx.get(c) or count <= mx[c])
+        return [c for c in self.cloud_order if self.api(c) and (mx.get(c) is None or count <= mx[c])
                 and (c not in (SHADEFORM, VAST) or gpu_type in self.api(c).gpu_map)]
 
     async def estimate(self, gpu_type: str | list[str], count: int, hours: float) -> tuple[float | None, str | None]:
-        """Worst case over the candidate GPU types that have a known price, each priced on the first
-        cloud that can host it. Unpriced alternatives are ignored; None only if nothing is priced."""
+        """Worst case over every (GPU type, cloud) the lease could land on: _create takes the cheapest
+        with capacity, which may be the dearest one. Unpriced alternatives are ignored; None only if
+        nothing is priced. Once granted, the reservation follows the pod's real price (Budget.committed)."""
         hints = self.p.fleet.get("price_hints", {})
         prices = await self.prices()
         worst: tuple[float, str] | None = None
@@ -166,9 +168,8 @@ class Fleet:
             got = None
             for cloud in self.clouds_for(t, count):
                 pr = (prices.get(t) or {}).get(cloud)
-                if pr:
+                if pr and (got is None or pr * count * hours > got[0]):
                     got = (pr * count * hours, cloud)
-                    break
             if got is None and t in hints:
                 got = (float(hints[t]) * count * hours, self.cloud_order[0])
             if got is not None and (worst is None or got[0] > worst[0]):

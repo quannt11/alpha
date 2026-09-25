@@ -161,3 +161,24 @@ async def test_state_commit_leaves_other_staged_changes_alone(cfg):
     await d._commit_state(p, "scout run 1")
     assert g("show", "--stat", "--format=%s", "HEAD").count("README.md") == 0
     assert "note.md" in g("show", "--stat", "HEAD") and "D  README.md" in g("status", "--short")
+
+
+async def test_outbox_sends_report_mirror_to_its_own_destination(cfg):
+    d = make(cfg)
+    p = cfg.project("affine")
+    mirror, guild = next(iter(p.report_mirrors.items()))
+    sent = []
+
+    async def send(dest, ch, content, **kw):
+        sent.append((dest.guild_id, dest.channel_id, ch))
+        return ["1"]
+    d.discord.send = send
+    for role in ("analyst", "thread"):
+        d.db.insert("outbox", project="affine", channel_id=mirror, content="x", status="pending",
+                    created_at=now(), author_role=role)
+    task = asyncio.create_task(d.outbox_loop())
+    await asyncio.sleep(0.2)
+    d.stop.set()
+    await task
+    # the analyst's row is pinned to the mirror; anyone else's is checked against #120 (and refused there)
+    assert sent == [(guild, mirror, mirror), (p.guild_id, p.channel_id, mirror)]

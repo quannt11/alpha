@@ -9,6 +9,8 @@ pod_prefix = "Pi_affine"           # pods are Pi_affine-01..N; Pi_affine stays t
 # Test server "Pi", channel #120. Switch to ZenAI #affine (guild ?, channel 1415976951298129950) when ready.
 guild_id = "1480562634783723610"
 channel_id = "1543609865518317578"
+# The daily report is also posted here (ZenAI #affine); everything else stays in #120 and replies there are ignored.
+# daily_report_also = [{ guild_id = "<guild id>", channel_id = "<channel id>" }]
 
 [budget]
 daily_usd = 600                    # the only spending limit: new leases are refused past it, pods stop at 100%

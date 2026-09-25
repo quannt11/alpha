@@ -35,6 +35,10 @@ def labdir(tmp_path, monkeypatch):
     pdir = tmp_path / "projects" / "affine"
     src = ROOT / "projects" / "affine"
     toml = (src / "project.toml").read_text().replace('root = "~/Work/affine"', f'root = "{tmp_path / "code"}"')
+    # a daily-report mirror of its own: the deployment's (or the public copy's, which has none) doesn't matter
+    toml = "\n".join(l for l in toml.splitlines() if not l.startswith("daily_report_also")).replace(
+        "[discord]\n", '[discord]\ndaily_report_also = [{ guild_id = "111111111111111111", '
+                        'channel_id = "222222222222222222" }]\n', 1)
     (pdir / "project.toml").write_text(toml)
     shutil.copy(src / "plugin.py", pdir / "plugin.py")
     shutil.copytree(src / "prompts", pdir / "prompts")

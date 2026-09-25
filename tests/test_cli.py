@@ -152,3 +152,82 @@ def test_gpu_pause_resume_humans_only(labdir, cfg, monkeypatch):
     monkeypatch.delenv("LAB_RUN_ID")
     run("gpu", "resume")
     assert not db.kv_get("affine", "gpu_paused")
+
+
+def test_gpu_resume_wakes_threads_with_a_task(labdir, cfg, thread, monkeypatch):
+    monkeypatch.delenv("LAB_THREAD")
+    run("gpu", "pause")
+    run("gpu", "resume")
+    db = DB(cfg.db_path)
+    ev = db.one("SELECT * FROM events WHERE topic='thread.continue'")
+    assert ev and ev["key"] == "t-001"
+
+
+def test_daily_report_mirrored_only_for_analyst_report(labdir, cfg, monkeypatch, tmp_path):
+    mirror = next(iter(cfg.project("affine").report_mirrors))
+    rep = tmp_path / "daily-2026-09-25.md"
+    rep.write_text("**affine daily**")
+    run("say", "--file-text", str(rep))                                  # not the analyst: #120 only
+    monkeypatch.setattr(cli, "ROLE", "analyst")
+    run("say", "claim holds")                                            # analyst, not the report
+    run("say", "--file-text", str(rep))
+    db = DB(cfg.db_path)
+    rows = [(r["channel_id"], r["content"]) for r in db.all("SELECT * FROM outbox ORDER BY id")]
+    assert [ch for ch, _ in rows].count(mirror) == 1 and rows[-1] == (mirror, "**affine daily**")
+    with pytest.raises(SystemExit):
+        run("say", "sneaky", "--channel-id", mirror)
+
+
+@pytest.fixture
+def two_projects(labdir):
+    """A second project next to affine: no plugin, its own code root."""
+    pdir = labdir / "projects" / "beta"
+    pdir.mkdir()
+    (labdir / "beta-code").mkdir()
+    (pdir / "project.toml").write_text(f'name = "beta"\nroot = "{labdir / "beta-code"}"\n[budget]\ndaily_usd = 50\n')
+    return pdir
+
+
+def test_status_covers_every_project_when_none_is_given(labdir, two_projects, capsys, monkeypatch):
+    monkeypatch.chdir(labdir)
+    run("status")
+    out = capsys.readouterr().out
+    assert "# affine — status" in out and "# beta — status" in out and out.count("labd heartbeat") == 1
+    with pytest.raises(SystemExit):
+        run("budget")                                   # everything else still needs a project
+    assert "which project?" in capsys.readouterr().err
+
+
+def test_project_is_taken_from_the_cwd(labdir, two_projects, capsys, monkeypatch):
+    sub = labdir / "beta-code" / "src"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+    run("status")
+    out = capsys.readouterr().out
+    assert "# beta — status" in out and "# affine" not in out
+    monkeypatch.chdir(labdir / "projects" / "affine")
+    run("status")
+    assert "# affine — status" in capsys.readouterr().out
+
+
+def test_world_facts_use_the_plugin_hook_or_show_every_field(cfg, two_projects, project):
+    from lab import config as config_mod
+    from lab.context import world_facts
+    (project.world_dir).mkdir(parents=True, exist_ok=True)
+    (project.world_dir / "world.json").write_text(json.dumps(
+        {"world_version": "wvk24-e1-abc", "teacher": "Qwen/T", "contract": {"duel.n_turns": 1000}}))
+    out = world_facts(project)
+    assert "teacher: Qwen/T" in out and "duel.n_turns=1000" in out and "our crowns:" in out
+    beta = config_mod.load(cfg.root / "lab.toml").project("beta")
+    beta.world_dir.mkdir(parents=True)
+    (beta.world_dir / "world.json").write_text(json.dumps({"world_version": "v1", "king": {"repo": "x/y"}}))
+    out = world_facts(beta)
+    assert out.startswith("world_version: v1") and 'king: {"repo": "x/y"}' in out
+
+
+def test_maint_is_lab_wide_but_a_request_needs_a_project(labdir, two_projects, capsys, monkeypatch):
+    monkeypatch.chdir(labdir)
+    run("maint", "list")                                 # lab-deploy runs `lab maint mark` with no project
+    with pytest.raises(SystemExit):
+        run("maint", "request", "change X")
+    assert "which project" in capsys.readouterr().err

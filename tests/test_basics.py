@@ -155,3 +155,39 @@ def test_guard_keeps_the_maintainer_in_its_worktree():
         assert guard("Bash", role="maintainer", command=cmd)[0] == 0, cmd
     # other agents may still write their own notes in the live tree
     assert guard("Edit", role="thread", file_path=f"{live}/projects/affine/work/threads/t-001/NOTES.md")[0] == 0
+
+
+def test_log_lines_never_carry_credentials():
+    import io
+    import logging
+    from lab.daemon import RedactSecrets
+    key = "rpa_" + "X" * 40
+    buf = io.StringIO()
+    h = logging.StreamHandler(buf)
+    h.addFilter(RedactSecrets({"RUNPOD_API_KEY": key, "DISCORD_ALLOWED_CHANNELS": "affine"}))
+    lg = logging.getLogger("test.redact")
+    lg.addHandler(h)
+    lg.propagate = False
+    lg.warning("stock refresh failed: %r", RuntimeError(f"503 for url 'https://api.runpod.io/graphql?api_key={key}'"))
+    try:
+        raise RuntimeError(f"boom {key}")
+    except RuntimeError:
+        lg.exception("fleet loop")
+    out = buf.getvalue()
+    assert key not in out and out.count("***") == 2 and "boom" in out
+    lg.removeHandler(h)
+
+
+async def test_runpod_graphql_sends_the_key_in_a_header_not_the_url():
+    import httpx
+    from lab.runpod import Runpod
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        return httpx.Response(200, json={"data": {"gpuTypes": []}})
+    rp = Runpod("rpa_secret_value_123", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await rp.gpu_prices()
+    await rp.stock([("NVIDIA H200", 1, "COMMUNITY")])
+    assert seen and all("rpa_secret" not in str(r.url) for r in seen)
+    assert all(r.headers["Authorization"] == "Bearer rpa_secret_value_123" for r in seen)
